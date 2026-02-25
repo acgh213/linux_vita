@@ -548,17 +548,33 @@ static int vita_syscon_scratchpad_write(struct vita_syscon *syscon, u16 offset, 
  *
  * The TrustZone Secure Monitor (SMC 0x11A) normally handles these commands,
  * but after Linux reconfigures the GIC and SPI controller, the Monitor can
- * no longer function.  Analysis of the Monitor's handler reveals it sends
- * raw SPI commands that differ from the VitaOS kernel-level command 0x0C:
+ * no longer function.  We replicate the TZ handler's SPI packets directly.
  *
- *   Cold reset:  cmd=0x0801, data={0x00}      — works from Linux
- *   Power off:   cmd=0x00C0, data={type, ...}  — rejected (result 0x3B)
- *   Hibernate:   cmd=0x00C2, data={0x5A}       — untested
- *   Ext boot:    cmd=0x00C1, data={0x00}       — untested
+ * From RE of VitaOS SceSyscon and henkaku wiki sceSysconSetPowerModeForDriver:
  *
- * Before issuing cold reset, we power off removable media via syscon so
- * VitaOS finds the controllers in a clean state on the next boot.
+ *   type=0 (power off):  cmd=0x00C0, data={type, ~mode_lo, ~mode_hi, mode_upper}
+ *   type=1 (suspend):    cmd=0x00C0, data={type, ~mode_lo, ~mode_hi, mode_upper}
+ *   type=2 (cold reset): cmd=0x0801, data={0x00}
+ *   type=3 (ext boot):   cmd=0x00C1, data={0x00}
+ *   type=4 (update):     cmd=0x00C1, data={0x01}
+ *   type=5 (hibernate):  cmd=0x00C2, data={0x5A}
+ *
+ * For cmd 0x00C0 the mode bytes are bit-inverted (~mode) in the payload.
+ * Mode 0x2 = software-initiated, 0x8002 = UDC/BT driver initiated.
  */
+static int vita_syscon_set_power_mode(struct vita_syscon *syscon,
+				      u8 type, u32 mode)
+{
+	u32 data;
+
+	data = (u32)type |
+	       ((~mode & 0xFF) << 8) |
+	       (((~mode >> 8) & 0xFF) << 16) |
+	       (((mode >> 16) & 0xFF) << 24);
+
+	return vita_syscon_short_command_write(syscon, 0x00C0, data, 5);
+}
+
 static int vita_syscon_reboot_notify(struct notifier_block *nb,
 				     unsigned long action, void *data)
 {
@@ -571,16 +587,13 @@ static int vita_syscon_reboot_notify(struct notifier_block *nb,
 		return NOTIFY_DONE;
 
 	/*
-	 * Power off peripherals before cold reset so VitaOS finds them in
-	 * a clean state on the next boot.  Without this, the Sony memory
+	 * Power off peripherals so VitaOS (on reboot) or Ernie (on poweroff)
+	 * finds controllers in a clean state.  Without this, the Sony memory
 	 * card (MSIF) stays half-initialized and VitaOS can't mount it.
-	 *
-	 * 0x89B = memory card (MSIF) power, 0x888 = game card slot power.
 	 */
-	vita_syscon_short_command_write(syscon, 0x89B, 0, 2);
-	vita_syscon_short_command_write(syscon, 0x888, 0, 2);
+	vita_syscon_short_command_write(syscon, 0x89B, 0, 2);  /* MSIF */
+	vita_syscon_short_command_write(syscon, 0x888, 0, 2);  /* game card */
 
-	/* Power off WiFi/BT if it was enabled */
 	if (syscon->wlan_power) {
 		vita_syscon_short_command_write(syscon, SYSCON_CMD_DEVICE_RESET,
 			0 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
@@ -589,7 +602,15 @@ static int vita_syscon_reboot_notify(struct notifier_block *nb,
 		vita_clockgen_wlanbt_disable(&syscon->spi->dev);
 	}
 
-	/* Cold reset: cmd 0x0801, 1 arg byte (0x00) */
+	if (action == SYS_POWER_OFF || action == SYS_HALT) {
+		/* Power off: type=0, mode=0x2 (software-initiated) */
+		ret = vita_syscon_set_power_mode(syscon, 0, 0x2);
+		if (ret)
+			pr_emerg("vita-syscon: poweroff failed: %d\n", ret);
+		return NOTIFY_DONE;
+	}
+
+	/* Cold reset */
 	ret = vita_syscon_short_command_write(syscon, 0x0801, 0x00, 2);
 	if (ret)
 		pr_emerg("vita-syscon: cold reset failed: %d\n", ret);
