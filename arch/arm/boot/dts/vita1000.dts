@@ -26,19 +26,14 @@
 	};
 };
 
-/* Enable all SDIF controllers for hardware probing */
+/* SDIF0 = eMMC, SDIF2 = WLAN/BT (SD8787 via SDIO) */
 &sdif0 {
 	status = "okay";
 };
 
-&sdif1 {
-	status = "okay";
-};
+/* SDIF1 (game card) and SDIF3 (microSD/SD2Vita) disabled --
+ * no cards present, and polling creates log spam */
 
 &sdif2 {
-	status = "okay";
-};
-
-&sdif3 {
 	status = "okay";
 };
