@@ -45,6 +45,7 @@ struct vita_syscon {
 	u8 hardware_flags[16];
 	/* WiFi power state */
 	int wlan_power;
+	struct mutex wlan_mutex;
 	struct i2c_adapter *clockgen_i2c;
 	/* Reboot */
 	struct notifier_block reboot_nb;
@@ -53,5 +54,9 @@ struct vita_syscon {
 /* From sdhci-vita.c -- called by syscon WiFi power sequencing */
 void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
+
+/* WLAN power helpers -- used by pwrseq-vita-wlan and sysfs */
+int vita_syscon_wlan_power_on(struct vita_syscon *syscon);
+int vita_syscon_wlan_power_off(struct vita_syscon *syscon);
 
 #endif /*  __LINUX_MFD_VITA_SYSCON_H */

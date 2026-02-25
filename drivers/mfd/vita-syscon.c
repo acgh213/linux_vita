@@ -154,6 +154,119 @@ static int vita_clockgen_wlanbt_disable(struct vita_syscon *syscon)
 	return vita_clockgen_write_reg(syscon, CLOCKGEN_REG_CLOCK, reg_val);
 }
 
+/*
+ * Exported WLAN power helpers — used by the pwrseq-vita-wlan driver.
+ * These wrap the clockgen I2C and Ernie SPI sequences so that the
+ * pwrseq driver doesn't need to know protocol details.
+ */
+
+/**
+ * vita_syscon_wlan_power_on - power on the SD8787 WiFi module
+ * @syscon: the vita_syscon instance
+ *
+ * Executes the full power-on sequence:
+ *   1. Enable 27MHz WlanBt reference clock (clockgen I2C)
+ *   2. Power on wireless via Ernie (cmd 0x88A)
+ *   3. De-assert WLANBT reset via Ernie (cmd 0x88F)
+ *
+ * Does NOT touch SDHCI registers — the caller (pwrseq or sysfs)
+ * is responsible for SDHCI controller re-init.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vita_syscon_wlan_power_on(struct vita_syscon *syscon)
+{
+	int ret;
+
+	mutex_lock(&syscon->wlan_mutex);
+
+	/* Enable 27MHz WlanBt clock from clockgen */
+	ret = vita_clockgen_wlanbt_enable(syscon);
+	if (ret) {
+		dev_err(syscon->dev, "wlan: clockgen enable failed: %d\n", ret);
+		goto out;
+	}
+	msleep(10);
+
+	/* Power on wireless via Ernie */
+	ret = syscon->short_command_write(syscon,
+		SYSCON_CMD_WIRELESS_POWER, 1, 2);
+	if (ret) {
+		dev_err(syscon->dev, "wlan: power on failed: %d\n", ret);
+		goto err_disable_clock;
+	}
+	msleep(50);
+
+	/* De-assert WLANBT reset via Ernie */
+	ret = syscon->short_command_write(syscon,
+		SYSCON_CMD_DEVICE_RESET,
+		1 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
+	if (ret) {
+		dev_err(syscon->dev, "wlan: reset de-assert failed: %d\n", ret);
+		goto err_power_off;
+	}
+	msleep(20);
+
+	syscon->wlan_power = 1;
+	mutex_unlock(&syscon->wlan_mutex);
+	return 0;
+
+err_power_off:
+	syscon->short_command_write(syscon, SYSCON_CMD_WIRELESS_POWER, 0, 2);
+err_disable_clock:
+	vita_clockgen_wlanbt_disable(syscon);
+out:
+	mutex_unlock(&syscon->wlan_mutex);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vita_syscon_wlan_power_on);
+
+/**
+ * vita_syscon_wlan_power_off - power off the SD8787 WiFi module
+ * @syscon: the vita_syscon instance
+ *
+ * Reverse of vita_syscon_wlan_power_on():
+ *   1. Assert WLANBT reset
+ *   2. Power off wireless
+ *   3. Disable 27MHz clock
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vita_syscon_wlan_power_off(struct vita_syscon *syscon)
+{
+	int ret;
+
+	mutex_lock(&syscon->wlan_mutex);
+
+	/* Assert WLANBT reset */
+	ret = syscon->short_command_write(syscon,
+		SYSCON_CMD_DEVICE_RESET,
+		0 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
+	if (ret) {
+		dev_err(syscon->dev, "wlan: reset assert failed: %d\n", ret);
+		goto out;
+	}
+	msleep(100);
+
+	/* Power off wireless */
+	ret = syscon->short_command_write(syscon,
+		SYSCON_CMD_WIRELESS_POWER, 0, 2);
+	if (ret) {
+		dev_err(syscon->dev, "wlan: power off failed: %d\n", ret);
+		goto out;
+	}
+
+	/* Disable 27MHz clock */
+	vita_clockgen_wlanbt_disable(syscon);
+
+	syscon->wlan_power = 0;
+
+out:
+	mutex_unlock(&syscon->wlan_mutex);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vita_syscon_wlan_power_off);
+
 static ssize_t wlan_power_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
@@ -180,19 +293,7 @@ static ssize_t wlan_power_store(struct device *dev,
 		return count;
 
 	if (val) {
-		/* Power on sequence (matches VitaOS boot order):
-		 * 1. Disable SDIF2 interrupts to prevent premature MMC detect
-		 * 2. Enable 27MHz WlanBt clock from clockgen
-		 * 3. Power on wireless via Ernie
-		 * 4. De-assert WLANBT reset via Ernie
-		 * 5. SDHCI re-init (pervasive teardown/rebuild, sets I/O voltage)
-		 * 6. Trigger MMC rescan (CMD5 etc will be sent by MMC core)
-		 *
-		 * We must disable SDHCI interrupts BEFORE powering on to prevent
-		 * the MMC core from racing to detect the card at the wrong voltage.
-		 */
-
-		/* Step 1: Disable SDIF2 interrupts to prevent premature detect */
+		/* Disable SDIF2 interrupts to prevent premature MMC detect */
 		{
 			void __iomem *sdif2 = ioremap(0xE0C10000, 0x100);
 			if (sdif2) {
@@ -203,70 +304,21 @@ static ssize_t wlan_power_store(struct device *dev,
 			}
 		}
 
-		/* Step 2: Enable 27MHz WlanBt clock from clockgen.
-		 * The SD8787 requires this 27MHz reference clock — fail
-		 * the entire power-on sequence if it can't be enabled.
-		 */
-		ret = vita_clockgen_wlanbt_enable(syscon);
-		if (ret) {
-			dev_err(dev, "wlan: clockgen enable failed: %d\n", ret);
+		/* Power on via shared helpers (clockgen + Ernie) */
+		ret = vita_syscon_wlan_power_on(syscon);
+		if (ret)
 			return ret;
-		}
-		msleep(10);
 
-		/* Step 3: Power on wireless via Ernie */
-		ret = syscon->short_command_write(syscon,
-			SYSCON_CMD_WIRELESS_POWER, 1, 2);
-		if (ret) {
-			dev_err(dev, "wlan: power on failed: %d\n", ret);
-			return ret;
-		}
-		msleep(50);
-
-		/* Step 4: De-assert WLANBT reset via Ernie
-		 * vita-libbaremetal packs: mode | (device << 8)
-		 * mode=1 (de-assert), device=0x10 (WLANBT)
-		 */
-		ret = syscon->short_command_write(syscon,
-			SYSCON_CMD_DEVICE_RESET,
-			1 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
-		if (ret) {
-			dev_err(dev, "wlan: reset de-assert failed: %d\n", ret);
-			return ret;
-		}
-		msleep(20);
-
-		/* Step 5: SDHCI re-init (pervasive teardown/rebuild, 1.8V I/O) */
+		/* SDHCI re-init (pervasive teardown/rebuild, 1.8V I/O) */
 		sdhci_vita_reinit_host(2);
 
-		/* Step 6: Trigger MMC rescan -- MMC core sends CMD5 etc */
+		/* Trigger MMC rescan -- MMC core sends CMD5 etc */
 		sdhci_vita_trigger_rescan(2);
 	} else {
-		/* Power off sequence (matches VitaOS shutdown order):
-		 * 1. Assert WLANBT reset
-		 * 2. Power off wireless
-		 * 3. Disable 27MHz clock
-		 */
-		ret = syscon->short_command_write(syscon,
-			SYSCON_CMD_DEVICE_RESET,
-			0 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
-		if (ret) {
-			dev_err(dev, "wlan: reset assert failed: %d\n", ret);
+		ret = vita_syscon_wlan_power_off(syscon);
+		if (ret)
 			return ret;
-		}
-		msleep(100);
-
-		ret = syscon->short_command_write(syscon,
-			SYSCON_CMD_WIRELESS_POWER, 0, 2);
-		if (ret) {
-			dev_err(dev, "wlan: power off failed: %d\n", ret);
-			return ret;
-		}
-
-		vita_clockgen_wlanbt_disable(syscon);
 	}
-
-	syscon->wlan_power = val;
 
 	return count;
 }
@@ -497,13 +549,8 @@ static int vita_syscon_reboot_notify(struct notifier_block *nb,
 	vita_syscon_short_command_write(syscon, 0x89B, 0, 2);  /* MSIF */
 	vita_syscon_short_command_write(syscon, 0x888, 0, 2);  /* game card */
 
-	if (syscon->wlan_power) {
-		vita_syscon_short_command_write(syscon, SYSCON_CMD_DEVICE_RESET,
-			0 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
-		vita_syscon_short_command_write(syscon, SYSCON_CMD_WIRELESS_POWER,
-			0, 2);
-		vita_clockgen_wlanbt_disable(syscon);
-	}
+	if (syscon->wlan_power)
+		vita_syscon_wlan_power_off(syscon);
 
 	if (action == SYS_POWER_OFF || action == SYS_HALT) {
 		/* Power off: type=0, mode=0x2 (software-initiated) */
@@ -568,6 +615,7 @@ static int vita_syscon_probe(struct spi_device *spi)
 		return PTR_ERR(syscon->tx_gpio);
 
 	init_completion(&syscon->rx_irq);
+	mutex_init(&syscon->wlan_mutex);
 
 	spi_set_drvdata(spi, syscon);
 	syscon->dev = &spi->dev;
