@@ -51,7 +51,8 @@ struct vita_syscon {
 	struct notifier_block reboot_nb;
 };
 
-/* From sdhci-vita.c -- called by syscon WiFi power sequencing */
+/* From sdhci-vita.c -- called by syscon/pwrseq WiFi power sequencing */
+void sdhci_vita_suppress_irqs(int bus_index);
 void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
 

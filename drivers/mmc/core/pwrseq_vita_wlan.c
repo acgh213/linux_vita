@@ -10,7 +10,7 @@
  *
  * Power-on sequence:
  *   pre_power_on:
- *     1. Disable SDIF2 interrupts (prevent premature MMC card detect)
+ *     1. Disable SDHCI interrupts (prevent premature MMC card detect)
  *     2. Enable 27MHz WlanBt reference clock (clockgen I2C)
  *     3. Power on wireless via Ernie syscon (cmd 0x88A)
  *     4. De-assert WLANBT reset via Ernie syscon (cmd 0x88F)
@@ -30,7 +30,6 @@
 #include <linux/slab.h>
 #include <linux/device.h>
 #include <linux/err.h>
-#include <linux/io.h>
 
 #include <linux/spi/spi.h>
 #include <linux/mmc/host.h>
@@ -46,28 +45,27 @@ struct mmc_pwrseq_vita_wlan {
 
 #define to_pwrseq_vita_wlan(p) container_of(p, struct mmc_pwrseq_vita_wlan, pwrseq)
 
-/*
- * SDIF2 register base — used to suppress interrupts before power-on.
- * Without this, the SDHCI controller fires card-insert interrupts at
- * the wrong voltage as soon as the SD8787 powers up.
- */
-#define SDIF2_BASE	0xE0C10000
-#define SDIF2_SIZE	0x100
+static int mmc_pwrseq_vita_wlan_get_bus_index(struct mmc_host *host)
+{
+	u32 bus_index;
+
+	if (of_property_read_u32(mmc_dev(host)->of_node,
+				 "vita,bus-index", &bus_index))
+		return -EINVAL;
+	return bus_index;
+}
 
 static void mmc_pwrseq_vita_wlan_pre_power_on(struct mmc_host *host)
 {
 	struct mmc_pwrseq_vita_wlan *pwrseq = to_pwrseq_vita_wlan(host->pwrseq);
-	void __iomem *sdif2;
-	int ret;
+	int bus_index, ret;
 
-	/* Disable SDIF2 interrupts to prevent premature card detect */
-	sdif2 = ioremap(SDIF2_BASE, SDIF2_SIZE);
-	if (sdif2) {
-		writel(0, sdif2 + 0x34);	  /* SDHCI_INT_ENABLE */
-		writel(0, sdif2 + 0x38);	  /* SDHCI_SIGNAL_ENABLE */
-		writel(0xFFFFFFFF, sdif2 + 0x30); /* Clear pending */
-		iounmap(sdif2);
-	}
+	bus_index = mmc_pwrseq_vita_wlan_get_bus_index(host);
+	if (bus_index < 0)
+		return;
+
+	/* Disable SDHCI interrupts to prevent premature card detect */
+	sdhci_vita_suppress_irqs(bus_index);
 
 	/* Power on: clockgen enable, Ernie power, Ernie reset deassert */
 	ret = vita_syscon_wlan_power_on(pwrseq->syscon);
@@ -84,8 +82,13 @@ static void mmc_pwrseq_vita_wlan_pre_power_on(struct mmc_host *host)
 static void mmc_pwrseq_vita_wlan_post_power_on(struct mmc_host *host)
 {
 	struct mmc_pwrseq_vita_wlan *pwrseq = to_pwrseq_vita_wlan(host->pwrseq);
+	int bus_index;
 
 	if (!pwrseq->power_on_ok)
+		return;
+
+	bus_index = mmc_pwrseq_vita_wlan_get_bus_index(host);
+	if (bus_index < 0)
 		return;
 
 	/*
@@ -96,7 +99,7 @@ static void mmc_pwrseq_vita_wlan_post_power_on(struct mmc_host *host)
 	 * This must happen after the SD8787 is powered but before the
 	 * MMC core tries to communicate with the card.
 	 */
-	sdhci_vita_reinit_host(2);
+	sdhci_vita_reinit_host(bus_index);
 }
 
 static void mmc_pwrseq_vita_wlan_power_off(struct mmc_host *host)

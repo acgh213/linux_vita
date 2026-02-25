@@ -106,6 +106,27 @@ static void sdhci_vita_pervasive_init(struct device *dev, u32 bus_index)
  *   5. SDHCI: bus voltage select (1.8V power, clock div 128, card clock enable)
  *   6. Trigger MMC core rescan
  */
+/**
+ * sdhci_vita_suppress_irqs - disable all SDHCI interrupts and clear pending
+ * @bus_index: SDIF bus number (0-3)
+ *
+ * Called before WiFi power-on to prevent premature card-detect interrupts
+ * at the wrong I/O voltage.  Uses the host's already-mapped ioaddr.
+ */
+void sdhci_vita_suppress_irqs(int bus_index)
+{
+	struct sdhci_host *host;
+
+	if (bus_index < 0 || bus_index > 3 || !vita_sdif_hosts[bus_index])
+		return;
+
+	host = vita_sdif_hosts[bus_index];
+	sdhci_writel(host, 0, SDHCI_INT_ENABLE);
+	sdhci_writel(host, 0, SDHCI_SIGNAL_ENABLE);
+	sdhci_writel(host, 0xFFFFFFFF, SDHCI_INT_STATUS);
+}
+EXPORT_SYMBOL_GPL(sdhci_vita_suppress_irqs);
+
 void sdhci_vita_reinit_host(int bus_index)
 {
 	struct sdhci_host *host;

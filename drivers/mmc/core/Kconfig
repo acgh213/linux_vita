@@ -25,7 +25,7 @@ config PWRSEQ_SD8787
 
 config PWRSEQ_VITA_WLAN
 	bool "PS Vita SD8787 WiFi power sequencing"
-	depends on OF && MFD_VITA_SYSCON
+	depends on OF && MFD_VITA_SYSCON && MMC_SDHCI_VITA
 	help
 	  Power sequence driver for the PS Vita's Marvell SD8787 WiFi module.
 	  This handles the multi-step power-on sequence through the Ernie
