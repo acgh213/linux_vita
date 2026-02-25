@@ -43,8 +43,14 @@ struct vita_syscon {
 	u32 baryon_version;
 	u32 hardware_info;
 	u8 hardware_flags[16];
+	/* WiFi power state */
+	int wlan_power;
 	/* Reboot */
 	struct notifier_block reboot_nb;
 };
+
+/* From sdhci-vita.c -- called by syscon WiFi power sequencing */
+void sdhci_vita_reinit_host(int bus_index);
+void sdhci_vita_trigger_rescan(int bus_index);
 
 #endif /*  __LINUX_MFD_VITA_SYSCON_H */
