@@ -190,12 +190,12 @@
 			status = "disabled";
 		};
 
-		/*global_timer@1a000200 {
+		global_timer@1a000200 {
 			compatible = "arm,cortex-a9-global-timer";
 			reg = <0x1a000200 0x100>;
 			interrupts = <GIC_PPI 11 (GIC_CPU_MASK_RAW(0xF) | IRQ_TYPE_EDGE_RISING)>;
 			clocks = <&refclk144mhz>;
-		};*/
+		};
 
 		local_timer@1a000600 {
 			compatible = "arm,cortex-a9-twd-timer";
