@@ -511,11 +511,20 @@ static int sdhci_vita_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_free;
 
-	ret = sdhci_add_host(host);
-	if (ret)
-		goto err_free;
-
+	/*
+	 * Register in the global array BEFORE sdhci_add_host(), because
+	 * sdhci_add_host() triggers mmc_power_up() which calls the pwrseq
+	 * post_power_on callback, and that needs sdhci_vita_reinit_host()
+	 * to find this host in vita_sdif_hosts[].
+	 */
 	vita_sdif_hosts[bus_index] = host;
+
+	ret = sdhci_add_host(host);
+	if (ret) {
+		vita_sdif_hosts[bus_index] = NULL;
+		goto err_free;
+	}
+
 	platform_set_drvdata(pdev, host);
 	return 0;
 

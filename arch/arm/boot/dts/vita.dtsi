@@ -178,6 +178,7 @@
 			reg = <0xe0c10000 0x1000>;
 			vita,bus-index = <2>;
 			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>;
+			mmc-pwrseq = <&wlan_pwrseq>;
 			status = "disabled";
 		};
 
@@ -269,6 +270,11 @@
 			#reset-cells = <1>;
 			reg = <0xe3101000 0x1000>;
 		};
+	};
+
+	wlan_pwrseq: wlan-pwrseq {
+		compatible = "vita,pwrseq-wlan";
+		vita,syscon = <&syscon>;
 	};
 
 	leds {

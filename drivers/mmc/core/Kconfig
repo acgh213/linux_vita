@@ -23,6 +23,18 @@ config PWRSEQ_SD8787
 	  This driver can also be built as a module. If so, the module
 	  will be called pwrseq_sd8787.
 
+config PWRSEQ_VITA_WLAN
+	bool "PS Vita SD8787 WiFi power sequencing"
+	depends on OF && MFD_VITA_SYSCON
+	help
+	  Power sequence driver for the PS Vita's Marvell SD8787 WiFi module.
+	  This handles the multi-step power-on sequence through the Ernie
+	  syscon (SPI) and clockgen (I2C), followed by SDHCI controller
+	  re-initialization.  Must be built-in (not a module) because it
+	  holds a direct pointer to the syscon driver data.
+
+	  If unsure, say N.
+
 config PWRSEQ_SIMPLE
 	tristate "Simple HW reset support for MMC"
 	default y
