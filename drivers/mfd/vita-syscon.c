@@ -3,6 +3,7 @@
 
 #include <linux/module.h>
 #include <linux/delay.h>
+#include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/spi/spi.h>
@@ -44,216 +45,113 @@ void __weak sdhci_vita_trigger_rescan(int bus_index)
 #define SYSCON_DEVICE_RESET_WLANBT	0x10
 
 /*
- * P1P40167 clockgen -- raw MMIO I2C access.
+ * P1P40167 clockgen — accessed via I2C subsystem.
  *
- * The clockgen is a CY27040-compatible clock generator on I2C bus 0.
- * It has 3 registers (0=revision, 1=clock control, 2=spread spectrum).
- * The CY27040 write protocol uses command bytes: reg N -> cmd byte (N - 128),
- * i.e. register 1 -> 0x81, not 0x01. This is why earlier raw I2C attempts
- * with register index 0x01 as the command byte failed silently.
+ * The clockgen is a CY27040-compatible clock generator on I2C bus 0
+ * (address 0x69).  It has 3 registers (0=revision, 1=clock control,
+ * 2=spread spectrum).  The CY27040 write protocol uses command bytes:
+ * reg N -> cmd byte (N - 128), i.e. register 1 -> 0x81.
  *
  * Register 1 bit assignments (Vita-specific, from PSP uofw + RE):
  *   bit 0: audio frequency select (0=44100, 1=48000)
  *   bit 2: MotionClk enable (confirmed by henkaku wiki)
- *   bit 3: WlanBtClk enable (27MHz buffered oscillator -- inferred from
- *           register reads showing 0xF7 after VitaOS disables WlanBt)
+ *   bit 3: WlanBtClk enable (27MHz buffered oscillator)
  *   bit 4: AudioClk enable
  */
-#define VITA_I2C0_BASE			0xE0500000
-#define VITA_I2C0_SIZE			0x1000
-#define VITA_PERVASIVE_GATE_BASE	0xE3102000
-#define VITA_PERVASIVE_RESET_BASE	0xE3101000
-#define VITA_PERVASIVE_I2C0_OFF		0x110
-
 #define CLOCKGEN_I2C_ADDR_7BIT		0x69	/* 8-bit: 0xD2 */
 #define CLOCKGEN_REG_CLOCK		1
 #define CLOCKGEN_CMD_REG(n)		((u8)((n) - 128))  /* reg 1 -> 0x81 */
 #define CLOCKGEN_WLANBT_BIT		BIT(3)
 
-/* I2C register offsets (indexed as u32 words) */
-#define I2C_REG_WRITE_FIFO		0	/* [0] */
-#define I2C_REG_READ_FIFO		1	/* [1] */
-#define I2C_REG_UNK2			2	/* [2] */
-#define I2C_REG_UNK3			3	/* [3] */
-#define I2C_REG_DEVICE_ADDR		4	/* [4] */
-#define I2C_REG_FLAGS			5	/* [5] */
-#define I2C_REG_SPEED			6	/* [6] */
-#define I2C_REG_BUSY			7	/* [7] */
-#define I2C_REG_IRQ_STATUS		0xA	/* [0xA] */
-#define I2C_REG_IRQ_CONTROL		0xB	/* [0xB] */
-
-static void __iomem *i2c0_base;
-
-static void vita_i2c0_wait_busy(void)
-{
-	int timeout = 10000;
-
-	while (readl(i2c0_base + I2C_REG_BUSY * 4) && --timeout > 0)
-		udelay(1);
-	if (!timeout)
-		pr_warn("vita-clockgen: I2C0 busy timeout\n");
-}
-
-static void vita_i2c0_init(void)
-{
-	void __iomem *gate, *reset;
-
-	/* Enable I2C0 clock and take out of reset via pervasive registers */
-	gate = ioremap(VITA_PERVASIVE_GATE_BASE + VITA_PERVASIVE_I2C0_OFF, 4);
-	if (gate) {
-		writel(readl(gate) | 1, gate);
-		iounmap(gate);
-	}
-	reset = ioremap(VITA_PERVASIVE_RESET_BASE + VITA_PERVASIVE_I2C0_OFF, 4);
-	if (reset) {
-		writel(readl(reset) & ~1, reset);
-		iounmap(reset);
-	}
-	udelay(100);
-
-	i2c0_base = ioremap(VITA_I2C0_BASE, VITA_I2C0_SIZE);
-	if (!i2c0_base) {
-		pr_err("vita-clockgen: failed to ioremap I2C0\n");
-		return;
-	}
-
-	/* Initialize I2C bus 0 (from vita-libbaremetal reference) */
-	writel(0x100F70F, i2c0_base + I2C_REG_IRQ_CONTROL * 4);
-	writel(1, i2c0_base + I2C_REG_UNK2 * 4);
-	writel(1, i2c0_base + I2C_REG_UNK3 * 4);
-	writel(7, i2c0_base + I2C_REG_FLAGS * 4);  /* reset bus */
-	mb();
-
-	vita_i2c0_wait_busy();
-
-	/* Clear pending IRQs */
-	writel(readl(i2c0_base + I2C_REG_IRQ_STATUS * 4),
-	       i2c0_base + I2C_REG_IRQ_STATUS * 4);
-	writel(0x1000000, i2c0_base + I2C_REG_IRQ_CONTROL * 4);
-
-	writel(4, i2c0_base + I2C_REG_SPEED * 4);
-}
-
-static int vita_i2c0_write(u8 addr_7bit, const u8 *buf, int len)
-{
-	int i;
-
-	if (!i2c0_base)
-		return -ENODEV;
-
-	writel(1, i2c0_base + I2C_REG_UNK2 * 4);
-	writel(1, i2c0_base + I2C_REG_UNK3 * 4);
-	writel(addr_7bit, i2c0_base + I2C_REG_DEVICE_ADDR * 4);
-
-	for (i = 0; i < len; i++)
-		writel(buf[i], i2c0_base + I2C_REG_WRITE_FIFO * 4);
-
-	writel((len << 8) | 2, i2c0_base + I2C_REG_FLAGS * 4);
-	vita_i2c0_wait_busy();
-
-	writel(4, i2c0_base + I2C_REG_FLAGS * 4);  /* stop */
-	vita_i2c0_wait_busy();
-
-	return 0;
-}
-
-static int vita_i2c0_write_read(u8 addr_7bit, const u8 *wbuf, int wlen,
-				u8 *rbuf, int rlen)
-{
-	int i;
-
-	if (!i2c0_base)
-		return -ENODEV;
-
-	/* Write phase */
-	writel(1, i2c0_base + I2C_REG_UNK2 * 4);
-	writel(1, i2c0_base + I2C_REG_UNK3 * 4);
-	writel(addr_7bit, i2c0_base + I2C_REG_DEVICE_ADDR * 4);
-
-	for (i = 0; i < wlen; i++)
-		writel(wbuf[i], i2c0_base + I2C_REG_WRITE_FIFO * 4);
-
-	writel((wlen << 8) | 2, i2c0_base + I2C_REG_FLAGS * 4);
-	vita_i2c0_wait_busy();
-
-	/* Repeated start for read */
-	writel(5, i2c0_base + I2C_REG_FLAGS * 4);
-	vita_i2c0_wait_busy();
-
-	writel((rlen << 8) | 0x13, i2c0_base + I2C_REG_FLAGS * 4);
-	vita_i2c0_wait_busy();
-
-	for (i = 0; i < rlen; i++)
-		rbuf[i] = readl(i2c0_base + I2C_REG_READ_FIFO * 4);
-
-	writel(4, i2c0_base + I2C_REG_FLAGS * 4);  /* stop */
-	vita_i2c0_wait_busy();
-
-	return 0;
-}
-
 /*
  * Read a single clockgen register using the CY27040 protocol.
- * Send cmd byte, then read 1 byte back.
+ * Send cmd byte, then read 1 byte back (combined write-read I2C xfer).
  */
-static int vita_clockgen_read_reg(u8 reg, u8 *val)
+static int vita_clockgen_read_reg(struct vita_syscon *syscon, u8 reg, u8 *val)
 {
+	struct i2c_msg msgs[2];
 	u8 cmd = CLOCKGEN_CMD_REG(reg);
+	int ret;
 
-	return vita_i2c0_write_read(CLOCKGEN_I2C_ADDR_7BIT, &cmd, 1, val, 1);
+	if (!syscon->clockgen_i2c)
+		return -ENODEV;
+
+	msgs[0].addr = CLOCKGEN_I2C_ADDR_7BIT;
+	msgs[0].flags = 0;
+	msgs[0].len = 1;
+	msgs[0].buf = &cmd;
+
+	msgs[1].addr = CLOCKGEN_I2C_ADDR_7BIT;
+	msgs[1].flags = I2C_M_RD;
+	msgs[1].len = 1;
+	msgs[1].buf = val;
+
+	ret = i2c_transfer(syscon->clockgen_i2c, msgs, 2);
+	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
 /*
  * Write a single clockgen register using the CY27040 protocol.
  * Send: [cmd_byte, value] where cmd_byte = (reg_index - 128).
  */
-static int vita_clockgen_write_reg(u8 reg, u8 val)
+static int vita_clockgen_write_reg(struct vita_syscon *syscon, u8 reg, u8 val)
 {
+	struct i2c_msg msg;
 	u8 buf[2] = { CLOCKGEN_CMD_REG(reg), val };
+	int ret;
 
-	return vita_i2c0_write(CLOCKGEN_I2C_ADDR_7BIT, buf, 2);
+	if (!syscon->clockgen_i2c)
+		return -ENODEV;
+
+	msg.addr = CLOCKGEN_I2C_ADDR_7BIT;
+	msg.flags = 0;
+	msg.len = 2;
+	msg.buf = buf;
+
+	ret = i2c_transfer(syscon->clockgen_i2c, &msg, 1);
+	return ret == 1 ? 0 : (ret < 0 ? ret : -EIO);
 }
 
-static int vita_clockgen_wlanbt_enable(struct device *dev)
+static int vita_clockgen_wlanbt_enable(struct vita_syscon *syscon)
 {
 	u8 reg_val;
 	int ret;
 
-	ret = vita_clockgen_read_reg(CLOCKGEN_REG_CLOCK, &reg_val);
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
 	if (ret)
 		return ret;
 
 	reg_val |= CLOCKGEN_WLANBT_BIT;
 
-	ret = vita_clockgen_write_reg(CLOCKGEN_REG_CLOCK, reg_val);
+	ret = vita_clockgen_write_reg(syscon, CLOCKGEN_REG_CLOCK, reg_val);
 	if (ret)
 		return ret;
 
 	/* Verify the write took effect */
-	ret = vita_clockgen_read_reg(CLOCKGEN_REG_CLOCK, &reg_val);
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
 	if (ret)
 		return ret;
 
 	if (!(reg_val & CLOCKGEN_WLANBT_BIT)) {
-		dev_err(dev, "clockgen: WlanBt bit did not stick!\n");
+		dev_err(syscon->dev, "clockgen: WlanBt bit did not stick!\n");
 		return -EIO;
 	}
 
 	return 0;
 }
 
-static int vita_clockgen_wlanbt_disable(struct device *dev)
+static int vita_clockgen_wlanbt_disable(struct vita_syscon *syscon)
 {
 	u8 reg_val;
 	int ret;
 
-	ret = vita_clockgen_read_reg(CLOCKGEN_REG_CLOCK, &reg_val);
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
 	if (ret)
 		return ret;
 
 	reg_val &= ~CLOCKGEN_WLANBT_BIT;
 
-	return vita_clockgen_write_reg(CLOCKGEN_REG_CLOCK, reg_val);
+	return vita_clockgen_write_reg(syscon, CLOCKGEN_REG_CLOCK, reg_val);
 }
 
 static ssize_t wlan_power_show(struct device *dev,
@@ -305,10 +203,15 @@ static ssize_t wlan_power_store(struct device *dev,
 			}
 		}
 
-		/* Step 2: Enable 27MHz WlanBt clock from clockgen */
-		ret = vita_clockgen_wlanbt_enable(dev);
-		if (ret)
-			dev_warn(dev, "wlan: clockgen enable failed: %d\n", ret);
+		/* Step 2: Enable 27MHz WlanBt clock from clockgen.
+		 * The SD8787 requires this 27MHz reference clock — fail
+		 * the entire power-on sequence if it can't be enabled.
+		 */
+		ret = vita_clockgen_wlanbt_enable(syscon);
+		if (ret) {
+			dev_err(dev, "wlan: clockgen enable failed: %d\n", ret);
+			return ret;
+		}
 		msleep(10);
 
 		/* Step 3: Power on wireless via Ernie */
@@ -360,7 +263,7 @@ static ssize_t wlan_power_store(struct device *dev,
 			return ret;
 		}
 
-		vita_clockgen_wlanbt_disable(dev);
+		vita_clockgen_wlanbt_disable(syscon);
 	}
 
 	syscon->wlan_power = val;
@@ -599,7 +502,7 @@ static int vita_syscon_reboot_notify(struct notifier_block *nb,
 			0 | (SYSCON_DEVICE_RESET_WLANBT << 8), 3);
 		vita_syscon_short_command_write(syscon, SYSCON_CMD_WIRELESS_POWER,
 			0, 2);
-		vita_clockgen_wlanbt_disable(&syscon->spi->dev);
+		vita_clockgen_wlanbt_disable(syscon);
 	}
 
 	if (action == SYS_POWER_OFF || action == SYS_HALT) {
@@ -627,6 +530,11 @@ static irqreturn_t vita_syscon_rx_gpio_irq_handler(int irq, void *dev_id)
 	complete(&syscon->rx_irq);
 
 	return IRQ_HANDLED;
+}
+
+static void vita_syscon_put_i2c_adapter(void *data)
+{
+	i2c_put_adapter((struct i2c_adapter *)data);
 }
 
 static int vita_syscon_probe(struct spi_device *spi)
@@ -701,8 +609,36 @@ static int vita_syscon_probe(struct spi_device *spi)
 	}
 	memcpy(syscon->hardware_flags, &hw_flags[SYSCON_RX_DATA], sizeof(syscon->hardware_flags));
 
-	/* Initialize raw I2C bus 0 for clockgen access */
-	vita_i2c0_init();
+	/* Look up I2C adapter for clockgen access (optional — WiFi clock
+	 * control won't work without it, but everything else still does)
+	 */
+	{
+		struct device_node *i2c_np;
+
+		i2c_np = of_parse_phandle(spi->dev.of_node,
+					  "vita,clockgen-i2c", 0);
+		if (i2c_np) {
+			struct i2c_adapter *adap;
+
+			adap = of_find_i2c_adapter_by_node(i2c_np);
+			of_node_put(i2c_np);
+			if (!adap) {
+				dev_info(&spi->dev,
+					 "I2C adapter not ready, deferring\n");
+				return -EPROBE_DEFER;
+			}
+			ret = devm_add_action_or_reset(&spi->dev,
+				vita_syscon_put_i2c_adapter, adap);
+			if (ret)
+				return ret;
+			syscon->clockgen_i2c = adap;
+			dev_info(&spi->dev, "clockgen I2C adapter: %s\n",
+				 adap->name);
+		} else {
+			dev_warn(&spi->dev, "no clockgen I2C specified, "
+				 "WiFi clock control unavailable\n");
+		}
+	}
 
 	syscon->reboot_nb.notifier_call = vita_syscon_reboot_notify;
 	syscon->reboot_nb.priority = 255;

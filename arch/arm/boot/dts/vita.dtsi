@@ -121,6 +121,33 @@
 		};
 
 		/*
+		 * I2C controllers.
+		 * VitaOS interrupt codes 0x8E-0x8F (from SceKernelIntrMgr wiki).
+		 * GIC_SPI = code - 32: I2C0=110, I2C1=111.
+		 */
+		i2c0: i2c@e0500000 {
+			compatible = "vita,i2c";
+			reg = <0xe0500000 0x1000>;
+			vita,bus-index = <0>;
+			interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH>;
+			resets = <&reset 68>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c1: i2c@e0510000 {
+			compatible = "vita,i2c";
+			reg = <0xe0510000 0x1000>;
+			vita,bus-index = <1>;
+			interrupts = <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH>;
+			resets = <&reset 69>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
 		 * SDIF controllers — standard SDHCI.
 		 * VitaOS interrupt codes: 0xDC-0xDF (from psvcmd56 RE).
 		 * Mapping: VitaOS code = GIC hardware IRQ ID,
@@ -214,6 +241,8 @@
 				reg = <0>;
 				#address-cells = <0>;
 				#size-cells = <0>;
+
+				vita,clockgen-i2c = <&i2c0>;
 
 				interrupt-parent = <&gpio0>;
 				interrupts = <4 IRQ_TYPE_EDGE_FALLING>;

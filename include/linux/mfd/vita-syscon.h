@@ -45,6 +45,7 @@ struct vita_syscon {
 	u8 hardware_flags[16];
 	/* WiFi power state */
 	int wlan_power;
+	struct i2c_adapter *clockgen_i2c;
 	/* Reboot */
 	struct notifier_block reboot_nb;
 };

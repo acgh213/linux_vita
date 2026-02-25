@@ -26,6 +26,12 @@
 	};
 };
 
+&i2c0 {
+	status = "okay";
+};
+
+/* I2C1 disabled — bus scan empty on PCH-1000 (no powered consumers) */
+
 /* SDIF0 = eMMC, SDIF2 = WLAN/BT (SD8787 via SDIO) */
 &sdif0 {
 	status = "okay";
