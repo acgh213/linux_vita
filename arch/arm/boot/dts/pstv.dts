@@ -12,7 +12,7 @@
 
 / {
 	chosen {
-		bootargs = "earlyprintk console=tty0 console=ttyS0";
+		bootargs = "earlyprintk keep_bootcon console=tty0 console=ttyS0,115200";
 
 		framebuffer0: framebuffer@20000000 {
 			compatible = "simple-framebuffer";
@@ -24,4 +24,23 @@
 			status = "okay";
 		};
 	};
+};
+
+&i2c0 {
+	status = "okay";
+};
+
+/* I2C1 has ADV7533 HDMI transmitter (0x38, 0x3D-0x3F) — disabled until
+ * a driver is written. Also has motion sensor (0x0C) and LCD brightness (0x64). */
+
+/* SDIF0 = eMMC, SDIF2 = WLAN/BT (SD8787 via SDIO) */
+&sdif0 {
+	status = "okay";
+};
+
+/* SDIF1 (game card) and SDIF3 (microSD/SD2Vita) disabled --
+ * no cards present, and polling creates log spam */
+
+&sdif2 {
+	status = "okay";
 };
