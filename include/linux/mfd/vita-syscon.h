@@ -60,4 +60,8 @@ void sdhci_vita_trigger_rescan(int bus_index);
 int vita_syscon_wlan_power_on(struct vita_syscon *syscon);
 int vita_syscon_wlan_power_off(struct vita_syscon *syscon);
 
+/* Audio clock helpers -- enable/disable AudioClk from P1P40167 clockgen */
+int vita_syscon_audio_clk_enable(struct vita_syscon *syscon, bool freq_48k);
+int vita_syscon_audio_clk_disable(struct vita_syscon *syscon);
+
 #endif /*  __LINUX_MFD_VITA_SYSCON_H */

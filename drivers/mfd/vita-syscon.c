@@ -61,7 +61,9 @@ void __weak sdhci_vita_trigger_rescan(int bus_index)
 #define CLOCKGEN_I2C_ADDR_7BIT		0x69	/* 8-bit: 0xD2 */
 #define CLOCKGEN_REG_CLOCK		1
 #define CLOCKGEN_CMD_REG(n)		((u8)((n) - 128))  /* reg 1 -> 0x81 */
+#define CLOCKGEN_AUDIOFREQ_BIT		BIT(0)	/* 0=44100, 1=48000 */
 #define CLOCKGEN_WLANBT_BIT		BIT(3)
+#define CLOCKGEN_AUDIOCLK_BIT		BIT(4)
 
 /*
  * Read a single clockgen register using the CY27040 protocol.
@@ -153,6 +155,80 @@ static int vita_clockgen_wlanbt_disable(struct vita_syscon *syscon)
 
 	return vita_clockgen_write_reg(syscon, CLOCKGEN_REG_CLOCK, reg_val);
 }
+
+/*
+ * Audio clock control — enable/disable the AudioClk output from the
+ * P1P40167 clockgen.  The WM1803E codec requires this clock to power up.
+ * Also sets the audio frequency select bit (48kHz by default).
+ */
+
+/**
+ * vita_syscon_audio_clk_enable - enable AudioClk from the clockgen
+ * @syscon: the vita_syscon instance
+ * @freq_48k: true for 48kHz family, false for 44.1kHz family
+ *
+ * Enables the AudioClk output (bit 4) and sets the frequency select
+ * bit (bit 0) accordingly.  The clockgen outputs either 24.576 MHz
+ * (for 48kHz multiples) or 22.5792 MHz (for 44.1kHz multiples).
+ */
+int vita_syscon_audio_clk_enable(struct vita_syscon *syscon, bool freq_48k)
+{
+	u8 reg_val;
+	int ret;
+
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
+	if (ret)
+		return ret;
+
+	reg_val |= CLOCKGEN_AUDIOCLK_BIT;
+	if (freq_48k)
+		reg_val |= CLOCKGEN_AUDIOFREQ_BIT;
+	else
+		reg_val &= ~CLOCKGEN_AUDIOFREQ_BIT;
+
+	ret = vita_clockgen_write_reg(syscon, CLOCKGEN_REG_CLOCK, reg_val);
+	if (ret)
+		return ret;
+
+	/* Verify */
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
+	if (ret)
+		return ret;
+
+	if (!(reg_val & CLOCKGEN_AUDIOCLK_BIT)) {
+		dev_err(syscon->dev, "clockgen: AudioClk bit did not stick!\n");
+		return -EIO;
+	}
+
+	dev_info(syscon->dev, "clockgen: AudioClk enabled (%s)\n",
+		 freq_48k ? "48kHz" : "44.1kHz");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vita_syscon_audio_clk_enable);
+
+/**
+ * vita_syscon_audio_clk_disable - disable AudioClk from the clockgen
+ * @syscon: the vita_syscon instance
+ */
+int vita_syscon_audio_clk_disable(struct vita_syscon *syscon)
+{
+	u8 reg_val;
+	int ret;
+
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
+	if (ret)
+		return ret;
+
+	reg_val &= ~CLOCKGEN_AUDIOCLK_BIT;
+
+	ret = vita_clockgen_write_reg(syscon, CLOCKGEN_REG_CLOCK, reg_val);
+	if (ret)
+		return ret;
+
+	dev_info(syscon->dev, "clockgen: AudioClk disabled\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(vita_syscon_audio_clk_disable);
 
 /*
  * Exported WLAN power helpers — used by the pwrseq-vita-wlan driver.
@@ -325,8 +401,46 @@ static ssize_t wlan_power_store(struct device *dev,
 
 static DEVICE_ATTR_RW(wlan_power);
 
+static ssize_t audio_clk_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	u8 reg_val;
+	int ret;
+
+	ret = vita_clockgen_read_reg(syscon, CLOCKGEN_REG_CLOCK, &reg_val);
+	if (ret)
+		return ret;
+
+	return sysfs_emit(buf, "%d\n",
+			  !!(reg_val & CLOCKGEN_AUDIOCLK_BIT));
+}
+
+static ssize_t audio_clk_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	unsigned int val;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val)
+		ret = vita_syscon_audio_clk_enable(syscon, true);
+	else
+		ret = vita_syscon_audio_clk_disable(syscon);
+
+	return ret ? ret : count;
+}
+
+static DEVICE_ATTR_RW(audio_clk);
+
 static struct attribute *vita_syscon_attrs[] = {
 	&dev_attr_wlan_power.attr,
+	&dev_attr_audio_clk.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vita_syscon);
