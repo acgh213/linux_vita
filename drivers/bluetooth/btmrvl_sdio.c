@@ -1545,8 +1545,6 @@ static int btmrvl_sdio_probe(struct sdio_func *func,
 		goto unreg_dev;
 	}
 
-	btmrvl_sdio_enable_host_int(card);
-
 	/* Device tree node parsing and platform specific configuration*/
 	btmrvl_sdio_probe_of(&func->dev, card);
 
@@ -1563,6 +1561,13 @@ static int btmrvl_sdio_probe(struct sdio_func *func,
 	priv->hw_host_to_card = btmrvl_sdio_host_to_card;
 	priv->hw_wakeup_firmware = btmrvl_sdio_wakeup_fw;
 	priv->hw_process_int_status = btmrvl_sdio_process_int_status;
+
+	/*
+	 * Enable host interrupts AFTER card->priv and hw_process_int_status
+	 * are set.  Otherwise the IRQ handler drops interrupts because
+	 * card->priv is still NULL.
+	 */
+	btmrvl_sdio_enable_host_int(card);
 
 	if (btmrvl_register_hdev(priv)) {
 		BT_ERR("Register hdev failed!");
