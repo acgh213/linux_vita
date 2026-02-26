@@ -1090,7 +1090,7 @@ config MFD_VIPERBOARD
 config MFD_VITA_SYSCON
 	tristate "PlayStation Vita Syscon (Ernie)"
 	depends on ARCH_VITA || COMPILE_TEST
-	depends on SPI && OF
+	depends on SPI && OF && I2C
 	select MFD_CORE
 	help
 	  Support for the PlayStation Vita's Syscon (Ernie)
