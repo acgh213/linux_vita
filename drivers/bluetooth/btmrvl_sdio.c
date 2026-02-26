@@ -1186,16 +1186,18 @@ static int btmrvl_sdio_download_fw(struct btmrvl_sdio_card *card)
 	}
 
 	/*
-	 * winner or not, with this test the FW synchronizes when the
-	 * module can continue its initialization
+	 * Release the host before polling for firmware readiness.
+	 * btmrvl_sdio_verify_fw_download() does its own per-iteration
+	 * claim/release, and holding the host across the entire poll
+	 * (up to 100 seconds) blocks SDIO interrupt processing for all
+	 * functions on this bus (WiFi, BT, etc.).
 	 */
+	sdio_release_host(card->func);
+
 	if (btmrvl_sdio_verify_fw_download(card, pollnum)) {
 		BT_ERR("FW failed to be active in time!");
-		ret = -ETIMEDOUT;
-		goto done;
+		return -ETIMEDOUT;
 	}
-
-	sdio_release_host(card->func);
 
 	return 0;
 
