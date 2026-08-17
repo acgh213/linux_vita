@@ -128,6 +128,107 @@ static void syscon_unknown_result_fails_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, syscon_result_policy(0x01, 1), -EREMOTEIO);
 }
 
+static void syscon_payload_roundtrip_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x04, 0x00, 0x06, 0x00, 0x0d, 0x06, 0x00, 0x01,
+			  0xe1 };
+	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			4);
+	KUNIT_EXPECT_EQ(test, dest[0], 0x0d);
+	KUNIT_EXPECT_EQ(test, dest[1], 0x06);
+	KUNIT_EXPECT_EQ(test, dest[2], 0x00);
+	KUNIT_EXPECT_EQ(test, dest[3], 0x01);
+}
+
+static void syscon_payload_larger_than_dest_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x04, 0x00, 0x06, 0x00, 0x0d, 0x06, 0x00, 0x01,
+			  0xe1 };
+	u8 dest[2] = { 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			-EMSGSIZE);
+	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
+	KUNIT_EXPECT_EQ(test, dest[1], 0xa5);
+}
+
+static void syscon_payload_smaller_than_dest_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x04, 0x00, 0x06, 0x00, 0x0d, 0x06, 0x00, 0x01,
+			  0xe1 };
+	u8 dest[8];
+	int i;
+
+	for (i = 0; i < 8; i++)
+		dest[i] = 0xa5;
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			4);
+	for (i = 4; i < 8; i++)
+		KUNIT_EXPECT_EQ(test, dest[i], 0xa5);
+}
+
+static void syscon_payload_zero_length_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x24, 0x00, 0x02, 0x00, 0xd9 };
+	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			0);
+	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
+	KUNIT_EXPECT_EQ(test, dest[1], 0xa5);
+}
+
+static void syscon_payload_trailing_bytes_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x24, 0x00, 0x02, 0x00, 0xd9, 0xaa, 0x55 };
+	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			0);
+	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
+}
+
+static void syscon_payload_propagates_validation_error_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x24, 0x00, 0x02, 0x00, 0xd8 }; /* bad checksum */
+	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			-EBADMSG);
+	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
+}
+
+static void syscon_payload_busy_result_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x04, 0x00, 0x02, 0x80, 0x79 };
+	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			-EBUSY);
+	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
+}
+
+static void syscon_payload_unknown_result_test(struct kunit *test)
+{
+	const u8 rx[] = { 0x24, 0x00, 0x02, 0x01, 0xd8 };
+	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
+
+	KUNIT_EXPECT_EQ(test,
+			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+			-EREMOTEIO);
+	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
+}
+
 static struct kunit_case syscon_policy_test_cases[] = {
 	KUNIT_CASE(syscon_henkaku_version_frame_test),
 	KUNIT_CASE(syscon_busy_frame_test),
@@ -141,6 +242,14 @@ static struct kunit_case syscon_policy_test_cases[] = {
 	KUNIT_CASE(syscon_busy_result_retries_below_max_test),
 	KUNIT_CASE(syscon_busy_result_stops_at_max_test),
 	KUNIT_CASE(syscon_unknown_result_fails_test),
+	KUNIT_CASE(syscon_payload_roundtrip_test),
+	KUNIT_CASE(syscon_payload_larger_than_dest_test),
+	KUNIT_CASE(syscon_payload_smaller_than_dest_test),
+	KUNIT_CASE(syscon_payload_zero_length_test),
+	KUNIT_CASE(syscon_payload_trailing_bytes_test),
+	KUNIT_CASE(syscon_payload_propagates_validation_error_test),
+	KUNIT_CASE(syscon_payload_busy_result_test),
+	KUNIT_CASE(syscon_payload_unknown_result_test),
 	{}
 };
 
