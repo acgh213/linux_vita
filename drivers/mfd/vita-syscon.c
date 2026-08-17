@@ -13,6 +13,9 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/vita-syscon.h>
 #include <linux/reboot.h>
+#include <linux/string.h>
+
+#include "vita-syscon-internal.h"
 
 /* From sdhci-vita.c -- full SDHCI re-init after WiFi power change */
 void __weak sdhci_vita_reinit_host(int bus_index)
@@ -367,10 +370,20 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 	struct spi_message msg;
 	struct spi_transfer tx_xfer, rx_xfer;
 	struct spi_device *spi = syscon->spi;
+	size_t payload_len;
 	unsigned int timeout;
+	unsigned int attempt;
+	u16 cmd;
+	u8 result;
+	int policy;
 	int ret = 0;
-	int tx_size = SYSCON_TX_HEADER_SIZE + tx[SYSCON_TX_LENGTH];
-	u8 res;
+	int tx_size;
+
+	if (rx_size < SYSCON_RX_HEADER_SIZE)
+		return -EMSGSIZE;
+
+	tx_size = SYSCON_TX_HEADER_SIZE + tx[SYSCON_TX_LENGTH];
+	cmd = tx[SYSCON_TX_CMD_LO] | (tx[SYSCON_TX_CMD_HI] << 8);
 
 	memset(&tx_xfer, 0, sizeof(tx_xfer));
 	memset(&rx_xfer, 0, sizeof(rx_xfer));
@@ -384,7 +397,7 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 
 	spi_bus_lock(spi->controller);
 
-	do {
+	for (attempt = 1; attempt <= SYSCON_MAX_ATTEMPTS; attempt++) {
 		reinit_completion(&syscon->rx_irq);
 
 		syscon_set_tx_gpio(syscon, true);
@@ -412,11 +425,39 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 		/* Receive data */
 		spi_message_init(&msg);
 		spi_message_add_tail(&rx_xfer, &msg);
+		memset(rx, 0, rx_size);
 		ret = spi_sync_locked(spi, &msg);
 		if (ret < 0)
 			goto out;
-		res = ((u8 *)rx)[SYSCON_RX_RESULT];
-	} while (res == 0x80 || res == 0x81);
+
+		ret = syscon_validate_rx_frame(rx, rx_size, &payload_len);
+		if (ret)
+			goto out;
+
+		result = ((u8 *)rx)[SYSCON_RX_RESULT];
+		policy = syscon_result_policy(result, attempt);
+		if (policy == SYSCON_RESULT_RETRY) {
+			/* LAB: temporary — visible retry trace for H1 evidence
+			 * (0x82 WLAN power investigation, 2026-08-17) */
+			dev_err_ratelimited(&spi->dev,
+					    "command 0x%04x attempt %u result 0x%02x (retrying)\n",
+					    cmd, attempt, result);
+			continue;
+		}
+
+		ret = policy;
+		if (ret == -EBUSY)
+			dev_warn_ratelimited(&spi->dev,
+					     "command 0x%04x busy after %u attempts\n",
+					     cmd, attempt);
+		else if (ret == -EREMOTEIO)
+			/* LAB: temporarily visible to capture the result byte for
+			 * the WLAN power-on mapping (H1 evidence, 2026-08-17) */
+			dev_err_ratelimited(&spi->dev,
+					    "command 0x%04x result 0x%02x\n",
+					    cmd, result);
+		goto out;
+	}
 
 out:
 	spi_bus_unlock(spi->controller);
@@ -587,9 +628,9 @@ static void vita_syscon_put_i2c_adapter(void *data)
 static int vita_syscon_probe(struct spi_device *spi)
 {
 	struct vita_syscon *syscon;
-	u8 baryon_version[SYSCON_RX_HEADER_SIZE + sizeof(syscon->baryon_version)];
-	u8 hw_info[SYSCON_RX_HEADER_SIZE + sizeof(syscon->hardware_info)];
-	u8 hw_flags[SYSCON_RX_HEADER_SIZE + sizeof(syscon->hardware_flags)];
+	u8 baryon_version[SYSCON_RX_HEADER_SIZE + sizeof(u32) + 1];
+	u8 hw_info[SYSCON_RX_HEADER_SIZE + sizeof(u32) + 1];
+	u8 hw_flags[SYSCON_RX_HEADER_SIZE + 16 + 1];
 	int ret, irq;
 
 	pr_info("vita_syscon_probe\n");
