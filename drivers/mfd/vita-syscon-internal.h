@@ -14,6 +14,7 @@
 #define SYSCON_RESULT_BUSY_FLAG	0x80	/* bit 7 set => command still busy */
 
 #define SYSCON_MAX_ATTEMPTS	16
+#define SYSCON_BUSY_RETRY_US	20000	/* poll gap between busy retries */
 
 /* A positive decision tells the transport to retry the command. */
 enum syscon_result_decision {
