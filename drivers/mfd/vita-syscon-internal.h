@@ -3,6 +3,7 @@
 #define __VITA_SYSCON_INTERNAL_H
 
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #define SYSCON_RX_HEADER_SIZE	4
@@ -61,6 +62,28 @@ static inline int syscon_result_policy(u8 result, unsigned int attempt)
 			-EBUSY;
 
 	return -EREMOTEIO;
+}
+
+static inline int syscon_rx_payload(const u8 *rx, size_t rx_capacity,
+				    void *dest, size_t dest_capacity)
+{
+	size_t payload_len;
+	int ret;
+
+	ret = syscon_validate_rx_frame(rx, rx_capacity, &payload_len);
+	if (ret)
+		return ret;
+
+	ret = syscon_result_policy(rx[SYSCON_RX_RESULT], SYSCON_MAX_ATTEMPTS);
+	if (ret)
+		return ret;
+
+	if (payload_len > dest_capacity)
+		return -EMSGSIZE;
+
+	memcpy(dest, &rx[SYSCON_RX_HEADER_SIZE], payload_len);
+
+	return payload_len;
 }
 
 #endif /* __VITA_SYSCON_INTERNAL_H */

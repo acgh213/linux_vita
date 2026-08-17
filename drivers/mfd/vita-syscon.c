@@ -436,14 +436,8 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 
 		result = ((u8 *)rx)[SYSCON_RX_RESULT];
 		policy = syscon_result_policy(result, attempt);
-		if (policy == SYSCON_RESULT_RETRY) {
-			/* LAB: temporary — visible retry trace for H1 evidence
-			 * (0x82 WLAN power investigation, 2026-08-17) */
-			dev_err_ratelimited(&spi->dev,
-					    "command 0x%04x attempt %u result 0x%02x (retrying)\n",
-					    cmd, attempt, result);
+		if (policy == SYSCON_RESULT_RETRY)
 			continue;
-		}
 
 		ret = policy;
 		if (ret == -EBUSY)
@@ -451,8 +445,11 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 					     "command 0x%04x busy after %u attempts\n",
 					     cmd, attempt);
 		else if (ret == -EREMOTEIO)
-			/* LAB: temporarily visible to capture the result byte for
-			 * the WLAN power-on mapping (H1 evidence, 2026-08-17) */
+			/*
+			 * Captures the actual result byte of an unmapped
+			 * terminal failure — this is how the 0x82 busy
+			 * sibling was identified (H1, 2026-08-17).
+			 */
 			dev_err_ratelimited(&spi->dev,
 					    "command 0x%04x result 0x%02x\n",
 					    cmd, result);
@@ -475,6 +472,49 @@ static int vita_syscon_command_read(struct vita_syscon *syscon, u16 cmd, void *r
 
 	return vita_syscon_transfer(syscon, tx, rx, rx_size);
 }
+
+/*
+ * Largest RX frame the transport receives into: header + payload +
+ * checksum.  The Ernie protocol's declared length is a u8, so a full
+ * frame can never exceed 3 + 255 bytes; 32 covers every command this
+ * driver exchanges and matches the fixed buffers used elsewhere in the
+ * transport.
+ */
+#define SYSCON_RX_FRAME_MAX	32
+
+/**
+ * vita_syscon_validated_read - issue a read command and return its
+ * validated payload bytes
+ * @syscon: the vita_syscon instance
+ * @cmd: Syscon command ID
+ * @dest: destination for the payload bytes
+ * @dest_capacity: capacity of @dest in bytes
+ *
+ * Kernel-internal API for MFD children.  The TX frame is constructed
+ * here, the response is received into an internal frame buffer, and the
+ * payload is copied out only after frame validation, result checking,
+ * and capacity enforcement all pass.  On success the actual payload
+ * length is returned; fixed-format callers must require it to equal
+ * their expected size.  Failures are negative errnos (-EREMOTEIO,
+ * -EBUSY, -EBADMSG, -EPROTO, -EMSGSIZE, -ETIMEDOUT); @dest is untouched
+ * on failure.
+ */
+int vita_syscon_validated_read(struct vita_syscon *syscon, u16 cmd,
+			       void *dest, size_t dest_capacity)
+{
+	u8 rx[SYSCON_RX_FRAME_MAX];
+	int ret;
+
+	if (dest_capacity > SYSCON_RX_FRAME_MAX - SYSCON_RX_HEADER_SIZE)
+		return -EMSGSIZE;
+
+	ret = syscon->command_read(syscon, cmd, rx, sizeof(rx));
+	if (ret < 0)
+		return ret;
+
+	return syscon_rx_payload(rx, sizeof(rx), dest, dest_capacity);
+}
+EXPORT_SYMBOL_GPL(vita_syscon_validated_read);
 
 static int vita_syscon_short_command_write(struct vita_syscon *syscon, u16 cmd, u32 data, int cmd_len)
 {
@@ -628,7 +668,6 @@ static void vita_syscon_put_i2c_adapter(void *data)
 static int vita_syscon_probe(struct spi_device *spi)
 {
 	struct vita_syscon *syscon;
-	u8 baryon_version[SYSCON_RX_HEADER_SIZE + sizeof(u32) + 1];
 	u8 hw_info[SYSCON_RX_HEADER_SIZE + sizeof(u32) + 1];
 	u8 hw_flags[SYSCON_RX_HEADER_SIZE + 16 + 1];
 	int ret, irq;
@@ -666,13 +705,15 @@ static int vita_syscon_probe(struct spi_device *spi)
 	syscon->short_command_write = vita_syscon_short_command_write;
 	syscon->scratchpad_read = vita_syscon_scratchpad_read;
 	syscon->scratchpad_write = vita_syscon_scratchpad_write;
+	syscon->validated_read = vita_syscon_validated_read;
 
-	ret = vita_syscon_command_read(syscon, 1, baryon_version, sizeof(baryon_version));
-	if (ret < 0) {
-		return ret;
+	ret = syscon->validated_read(syscon, 1, &syscon->baryon_version,
+				     sizeof(syscon->baryon_version));
+	if (ret != sizeof(syscon->baryon_version)) {
+		dev_err(&spi->dev, "baryon version read: bad payload size: %d\n",
+			ret);
+		return ret < 0 ? ret : -EPROTO;
 	}
-	memcpy(&syscon->baryon_version, &baryon_version[SYSCON_RX_DATA],
-	       sizeof(syscon->baryon_version));
 
 	pr_info("Vita Syscon Baryon version: 0x%X\n", syscon->baryon_version);
 
