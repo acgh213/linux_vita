@@ -11,9 +11,7 @@
 #define SYSCON_RX_RESULT	3
 
 #define SYSCON_RESULT_SUCCESS	0x00
-#define SYSCON_RESULT_BUSY	0x80
-#define SYSCON_RESULT_BUSY_ALT	0x81
-#define SYSCON_RESULT_BUSY_ALT2	0x82
+#define SYSCON_RESULT_BUSY_FLAG	0x80	/* bit 7 set => command still busy */
 
 #define SYSCON_MAX_ATTEMPTS	16
 
@@ -53,15 +51,23 @@ static inline int syscon_validate_rx_frame(const u8 *rx, size_t rx_capacity,
 
 static inline int syscon_result_policy(u8 result, unsigned int attempt)
 {
-	if (result == SYSCON_RESULT_SUCCESS)
-		return 0;
-
-	if (result == SYSCON_RESULT_BUSY || result == SYSCON_RESULT_BUSY_ALT ||
-	    result == SYSCON_RESULT_BUSY_ALT2)
+	/*
+	 * The result byte is a status flag: bit 7 is the busy flag.  When
+	 * set (0x80..0xFF) the command is still processing and must be
+	 * retried.  When clear (0x00..0x7F) the command is complete; the low
+	 * 7 bits are a command-specific status.  0x00 is the common "success",
+	 * but other values are legitimate (e.g. the hardware-flags read,
+	 * cmd 6, returns 0x3f on the Vita 1000; the touchpanel info read
+	 * returns 0x07) and MUST NOT be treated as errors.  A previous policy
+	 * returned -EREMOTEIO for any unmapped byte, which aborted the syscon
+	 * probe — and with it the whole MFD cell tree, including the WiFi
+	 * power sequencer — on the Vita 1000 (2026-08-17).
+	 */
+	if (result & SYSCON_RESULT_BUSY_FLAG)
 		return attempt < SYSCON_MAX_ATTEMPTS ? SYSCON_RESULT_RETRY :
 			-EBUSY;
 
-	return -EREMOTEIO;
+	return 0;
 }
 
 static inline int syscon_rx_payload(const u8 *rx, size_t rx_capacity,

@@ -123,9 +123,14 @@ static void syscon_busy_result_stops_at_max_test(struct kunit *test)
 			syscon_result_policy(0x82, SYSCON_MAX_ATTEMPTS), -EBUSY);
 }
 
-static void syscon_unknown_result_fails_test(struct kunit *test)
+static void syscon_status_result_done_test(struct kunit *test)
 {
-	KUNIT_EXPECT_EQ(test, syscon_result_policy(0x01, 1), -EREMOTEIO);
+	/* Non-zero status with the busy flag clear is "done", not an
+	 * error.  cmd 6 (hw-flags) returns 0x3f on the Vita 1000.
+	 */
+	KUNIT_EXPECT_EQ(test, syscon_result_policy(0x01, 1), 0);
+	KUNIT_EXPECT_EQ(test, syscon_result_policy(0x3f, 1), 0);
+	KUNIT_EXPECT_EQ(test, syscon_result_policy(0x07, 1), 0);
 }
 
 static void syscon_payload_roundtrip_test(struct kunit *test)
@@ -218,14 +223,17 @@ static void syscon_payload_busy_result_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
 }
 
-static void syscon_payload_unknown_result_test(struct kunit *test)
+static void syscon_payload_status_result_test(struct kunit *test)
 {
 	const u8 rx[] = { 0x24, 0x00, 0x02, 0x01, 0xd8 };
 	u8 dest[4] = { 0xa5, 0xa5, 0xa5, 0xa5 };
 
+	/* result 0x01 (busy flag clear) is a status, not an error; the
+	 * zero-length payload yields 0 and leaves dest untouched.
+	 */
 	KUNIT_EXPECT_EQ(test,
-			syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
-			-EREMOTEIO);
+		syscon_rx_payload(rx, sizeof(rx), dest, sizeof(dest)),
+		0);
 	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
 }
 
@@ -241,7 +249,7 @@ static struct kunit_case syscon_policy_test_cases[] = {
 	KUNIT_CASE(syscon_success_result_test),
 	KUNIT_CASE(syscon_busy_result_retries_below_max_test),
 	KUNIT_CASE(syscon_busy_result_stops_at_max_test),
-	KUNIT_CASE(syscon_unknown_result_fails_test),
+	KUNIT_CASE(syscon_status_result_done_test),
 	KUNIT_CASE(syscon_payload_roundtrip_test),
 	KUNIT_CASE(syscon_payload_larger_than_dest_test),
 	KUNIT_CASE(syscon_payload_smaller_than_dest_test),
@@ -249,7 +257,7 @@ static struct kunit_case syscon_policy_test_cases[] = {
 	KUNIT_CASE(syscon_payload_trailing_bytes_test),
 	KUNIT_CASE(syscon_payload_propagates_validation_error_test),
 	KUNIT_CASE(syscon_payload_busy_result_test),
-	KUNIT_CASE(syscon_payload_unknown_result_test),
+	KUNIT_CASE(syscon_payload_status_result_test),
 	{}
 };
 

@@ -444,15 +444,15 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 			dev_warn_ratelimited(&spi->dev,
 					     "command 0x%04x busy after %u attempts\n",
 					     cmd, attempt);
-		else if (ret == -EREMOTEIO)
-			/*
-			 * Captures the actual result byte of an unmapped
-			 * terminal failure — this is how the 0x82 busy
-			 * sibling was identified (H1, 2026-08-17).
+		else if (result != SYSCON_RESULT_SUCCESS)
+			/* Non-zero status with the busy flag clear is a
+			 * command-specific status, not an error (e.g. cmd 6
+			 * hw-flags returns 0x3f on the Vita 1000).  Keep it
+			 * visible but treat the command as complete.
 			 */
-			dev_err_ratelimited(&spi->dev,
-					    "command 0x%04x result 0x%02x\n",
-					    cmd, result);
+			dev_warn_ratelimited(&spi->dev,
+					     "command 0x%04x status 0x%02x\n",
+					     cmd, result);
 		goto out;
 	}
 
