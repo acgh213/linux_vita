@@ -436,8 +436,14 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 
 		result = ((u8 *)rx)[SYSCON_RX_RESULT];
 		policy = syscon_result_policy(result, attempt);
-		if (policy == SYSCON_RESULT_RETRY)
+		if (policy == SYSCON_RESULT_RETRY) {
+			/* LAB: temporary — visible retry trace for H1 evidence
+			 * (0x82 WLAN power investigation, 2026-08-17) */
+			dev_err_ratelimited(&spi->dev,
+					    "command 0x%04x attempt %u result 0x%02x (retrying)\n",
+					    cmd, attempt, result);
 			continue;
+		}
 
 		ret = policy;
 		if (ret == -EBUSY)
@@ -445,7 +451,9 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 					     "command 0x%04x busy after %u attempts\n",
 					     cmd, attempt);
 		else if (ret == -EREMOTEIO)
-			dev_dbg_ratelimited(&spi->dev,
+			/* LAB: temporarily visible to capture the result byte for
+			 * the WLAN power-on mapping (H1 evidence, 2026-08-17) */
+			dev_err_ratelimited(&spi->dev,
 					    "command 0x%04x result 0x%02x\n",
 					    cmd, result);
 		goto out;
