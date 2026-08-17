@@ -39,6 +39,8 @@ struct vita_syscon {
 	int (*short_command_write)(struct vita_syscon *syscon, u16 cmd, u32 data, int cmd_len);
 	int (*scratchpad_read)(struct vita_syscon *syscon, u16 offset, void *buffer, int size);
 	int (*scratchpad_write)(struct vita_syscon *syscon, u16 offset, const void *buffer, int size);
+	int (*validated_read)(struct vita_syscon *syscon, u16 cmd,
+			      void *dest, size_t dest_capacity);
 	/* Syscon info */
 	u32 baryon_version;
 	u32 hardware_info;
@@ -59,5 +61,8 @@ void sdhci_vita_trigger_rescan(int bus_index);
 /* WLAN power helpers -- used by pwrseq-vita-wlan and sysfs */
 int vita_syscon_wlan_power_on(struct vita_syscon *syscon);
 int vita_syscon_wlan_power_off(struct vita_syscon *syscon);
+
+int vita_syscon_validated_read(struct vita_syscon *syscon, u16 cmd,
+			       void *dest, size_t dest_capacity);
 
 #endif /*  __LINUX_MFD_VITA_SYSCON_H */
