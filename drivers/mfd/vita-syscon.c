@@ -671,7 +671,6 @@ static void vita_syscon_put_i2c_adapter(void *data)
 static int vita_syscon_probe(struct spi_device *spi)
 {
 	struct vita_syscon *syscon;
-	u8 baryon_version[SYSCON_RX_HEADER_SIZE + sizeof(u32) + 1];
 	u8 hw_info[SYSCON_RX_HEADER_SIZE + sizeof(u32) + 1];
 	u8 hw_flags[SYSCON_RX_HEADER_SIZE + 16 + 1];
 	int ret, irq;
@@ -711,12 +710,13 @@ static int vita_syscon_probe(struct spi_device *spi)
 	syscon->scratchpad_write = vita_syscon_scratchpad_write;
 	syscon->validated_read = vita_syscon_validated_read;
 
-	ret = vita_syscon_command_read(syscon, 1, baryon_version, sizeof(baryon_version));
-	if (ret < 0) {
-		return ret;
+	ret = syscon->validated_read(syscon, 1, &syscon->baryon_version,
+				     sizeof(syscon->baryon_version));
+	if (ret != sizeof(syscon->baryon_version)) {
+		dev_err(&spi->dev, "baryon version read: bad payload size: %d\n",
+			ret);
+		return ret < 0 ? ret : -EPROTO;
 	}
-	memcpy(&syscon->baryon_version, &baryon_version[SYSCON_RX_DATA],
-	       sizeof(syscon->baryon_version));
 
 	pr_info("Vita Syscon Baryon version: 0x%X\n", syscon->baryon_version);
 
