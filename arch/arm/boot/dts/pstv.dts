@@ -8,6 +8,7 @@
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/clock/vita-pervasive.h>
 #include "vita.dtsi"
 
 / {
@@ -42,5 +43,22 @@
  * no cards present, and polling creates log spam */
 
 &sdif2 {
+	status = "okay";
+};
+
+/* USB host (EHCI-only; see the OHCI note in vita.dtsi).  All three buses
+ * enabled for bring-up: the internal SMSC USB-Ethernet and the Type-A
+ * port are believed to sit on bus 0 or bus 1 (neither had ever been
+ * driven before 2026-08-19), bus 2 is the OTG bus the 2026-08-18
+ * EHCI/OHCI campaign studied. */
+&ehci0 {
+	status = "okay";
+};
+
+&ehci1 {
+	status = "okay";
+};
+
+&ehci2 {
 	status = "okay";
 };

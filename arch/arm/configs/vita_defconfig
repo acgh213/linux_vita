@@ -78,7 +78,23 @@ CONFIG_FB_SIMPLE=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
 CONFIG_HIDRAW=y
-# CONFIG_USB_SUPPORT is not set
+CONFIG_USB_SUPPORT=y
+CONFIG_USB=y
+# Host: three EHCI cores (buses 0/1/2).  OHCI companions are built but
+# have no DT nodes -- their +0x200 window is decode-gated (one-way page
+# poison; see vita.dtsi).
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_EHCI_HCD_PLATFORM=y
+CONFIG_USB_EHCI_ROOT_HUB_TT=y
+CONFIG_USB_OHCI_HCD=y
+CONFIG_USB_OHCI_HCD_PLATFORM=y
+# Internal SMSC LAN951x USB-Ethernet on the PSTV (bus 0 or 1, TBD).
+CONFIG_USB_NET_DRIVERS=y
+CONFIG_USB_USBNET=y
+CONFIG_USB_NET_SMSC95XX=y
+# Gadget stack parked until the real UDC block (0xE40C/0xE40D0000) is
+# identified: the 08-17 "snps,dwc2" node was actually the bus-2 EHCI.
+CONFIG_CLK_VITA_PERVASIVE=y
 CONFIG_MMC=y
 CONFIG_PWRSEQ_VITA_WLAN=y
 CONFIG_MMC_DEBUG=y
