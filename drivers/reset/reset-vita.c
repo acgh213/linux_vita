@@ -10,8 +10,22 @@
 #include <linux/types.h>
 #include <linux/of_device.h>
 
+/*
+ * Reset ids pack an optional bit-mask into the upper 16 bits:
+ *
+ *   id = register_index | (mask << 16)
+ *
+ * A plain index (mask == 0) means "bit 0", which keeps every existing
+ * consumer (gpio0=64, spi0=65, i2c0/1=68/69, ...) working unchanged.
+ * Some devices occupy several bits of one register -- e.g. USB bus 2 at
+ * register index 38 (offset 0x98) uses mask 0xF.
+ */
+#define VITA_RESET_IDX(id)	((id) & 0xffff)
+#define VITA_RESET_MASK(id)	((u32)((id) >> 16))
+
 struct vita_reset {
 	void __iomem *reg_base;
+	unsigned int nr_regs;
 	struct reset_controller_dev rcdev;
 	spinlock_t lock;
 };
@@ -21,12 +35,20 @@ static int vita_reset_level(struct reset_controller_dev *rcdev,
 {
 	struct vita_reset *vreset =
 		container_of(rcdev, struct vita_reset, rcdev);
-	void __iomem *reg_addr = vreset->reg_base + id * 4;
+	unsigned long idx = VITA_RESET_IDX(id);
+	u32 mask = VITA_RESET_MASK(id);
+	void __iomem *reg_addr = vreset->reg_base + idx * 4;
 	unsigned long flags;
 	u32 val;
-	const u32 mask = 1;
 
-	pr_info("vita_reset_level: id: %ld, assert: %d\n", id, assert);
+	if (!mask)
+		mask = 1;
+
+	if (idx >= vreset->nr_regs)
+		return -EINVAL;
+
+	pr_info("%s: idx: %lu, mask: %#x, assert: %d\n",
+		__func__, idx, mask, assert);
 
 	spin_lock_irqsave(&vreset->lock, flags);
 
@@ -63,7 +85,7 @@ static int vita_reset_probe(struct platform_device *pdev)
 	struct vita_reset *data;
 	struct resource *res;
 
-	pr_info("vita_reset_probe\n");
+	dev_info(&pdev->dev, "probe\n");
 
 	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
@@ -79,7 +101,12 @@ static int vita_reset_probe(struct platform_device *pdev)
 	spin_lock_init(&data->lock);
 
 	data->rcdev.owner = THIS_MODULE;
-	data->rcdev.nr_resets = resource_size(res) / 4;
+	data->nr_regs = resource_size(res) / 4;
+	/* ids carry a mask in the upper bits, so the framework's bounds check
+	 * cannot be the register count; vita_reset_level() validates the
+	 * index.
+	 */
+	data->rcdev.nr_resets = 0xffffff;
 	data->rcdev.ops = &vita_reset_ops;
 	data->rcdev.of_node = pdev->dev.of_node;
 

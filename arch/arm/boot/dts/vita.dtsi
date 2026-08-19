@@ -270,6 +270,78 @@
 			#reset-cells = <1>;
 			reg = <0xe3101000 0x1000>;
 		};
+
+		/* Pervasive clock gates.  Mirrors the reset block's register
+		 * layout (one 32-bit register per device, index = offset/4),
+		 * but a set bit enables the device's clock. */
+		pervasive_clk: clock-controller@e3100000 {
+			compatible = "vita,pervasive-clk";
+			#clock-cells = <1>;
+			/* Reg 0: pervasive flags page (+0x084..0x8C USB mode
+			 * flags).  Reg 1: clk gate page (+0x090..0x98 USB
+			 * buses).  Reg 2: USB PHY page (ready bit +0xF30,
+			 * bus-2 location; buses 0/1 PHY pages unmapped).
+			 * The reset page (0xE3101000) is intentionally not
+			 * listed: reset-vita owns that region; this driver
+			 * reaches it with an unclaimed ioremap for the
+			 * host-mode park sequence only. */
+			reg = <0xe3100000 0x1000>,
+			      <0xe3102000 0x1000>,
+			      <0xe3110000 0x1000>;
+		};
+
+		/* USB 2.0 host controllers: three EHCI 1.0 cores, one per
+		 * bus (SceUsbd names them SceUsbEhci0/1/2), each with a
+		 * one-port OHCI 1.0 companion at +0x200 in the same page.
+		 * Identification and IRQs from the 2026-08-18 EHCI/OHCI
+		 * campaign (lab/usb-ehci-ohci-writeup-2026-08-18.md in the
+		 * research repo): every live register value matches the
+		 * EHCI 1.0 spec, and SceUsbd registers ISRs at VitaOS
+		 * codes 146/148/150 -> GIC_SPI 114/116/118 (code - 32).
+		 *
+		 * The OHCI companions are deliberately NOT described: their
+		 * register window (+0x200) only decodes under firmware-side
+		 * conditions Linux has not reproduced, and probing it
+		 * external-aborts and poisons the whole bus page until the
+		 * next power cycle (one-way).  Do not add ohci-platform
+		 * nodes for these buses until that decode gate is
+		 * understood.
+		 *
+		 * Pervasive wiring per bus: gate 0xE3102090/94/98 (clock
+		 * ids 0/1/2, mask 0xF) and reset index 36/37/38 (mask 0xF).
+		 * The EHCI window itself decodes only A0-A7 (0x100 bytes;
+		 * it mirrors at every 0x100 stride above that).
+		 *
+		 * Vendor block at +0x94/+0x98/+0xA4 (SceUsbd writes
+		 * +0x94 = 0x01000010 at init): ehci-platform does not touch
+		 * these; add a vita shim if the cores misbehave without it.
+		 */
+		ehci0: usb@e40e0000 {
+			compatible = "generic-ehci";
+			reg = <0xe40e0000 0x100>;
+			interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&pervasive_clk VITA_PCLK_USB0>;
+			resets = <&reset ((0xf << 16) | 36)>;
+			status = "disabled";
+		};
+
+		ehci1: usb@e40b0000 {
+			compatible = "generic-ehci";
+			reg = <0xe40b0000 0x100>;
+			interrupts = <GIC_SPI 116 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&pervasive_clk VITA_PCLK_USB1>;
+			resets = <&reset ((0xf << 16) | 37)>;
+			status = "disabled";
+		};
+
+		ehci2: usb@e4020000 {
+			compatible = "generic-ehci";
+			reg = <0xe4020000 0x100>;
+			interrupts = <GIC_SPI 118 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&pervasive_clk VITA_PCLK_USB2>;
+			resets = <&reset ((0xf << 16) | 38)>;
+			status = "disabled";
+		};
 	};
 
 	wlan_pwrseq: wlan-pwrseq {
