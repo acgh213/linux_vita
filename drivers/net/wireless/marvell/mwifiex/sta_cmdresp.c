@@ -1218,6 +1218,18 @@ int mwifiex_process_sta_cmdresp(struct mwifiex_private *priv, u16 cmdresp_no,
 
 	/* If the command is not successful, cleanup and return failure */
 	if (resp->result != HostCmd_RESULT_OK) {
+		/*
+		 * CHAN_REGION_CFG is best-effort: older firmware (e.g.
+		 * SD8787) may not support it. Fall back to the default
+		 * regulatory domain instead of aborting firmware init.
+		 */
+		if (cmdresp_no == HostCmd_CMD_CHAN_REGION_CFG) {
+			mwifiex_dbg(adapter, ERROR,
+				    "CHAN_REGION_CFG unsupported (result=%#x), "
+				    "using default reg domain\n",
+				    resp->result);
+			return 0;
+		}
 		mwifiex_process_cmdresp_error(priv, resp);
 		return -1;
 	}
