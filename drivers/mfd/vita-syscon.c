@@ -328,8 +328,53 @@ static ssize_t wlan_power_store(struct device *dev,
 
 static DEVICE_ATTR_RW(wlan_power);
 
+/*
+ * PSTV external USB 5 V rail.
+ *
+ * VitaOS ksceSysconCtrlDolceUsbPower() is command 0x8c5 with a one-byte
+ * boolean payload (command length 2).  Keep this deliberately specific:
+ * exposing the generic syscon command transport would permit unrelated
+ * hardware writes from userspace.
+ */
+static ssize_t dolce_usb_power_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", syscon->dolce_usb_power);
+}
+
+static ssize_t dolce_usb_power_store(struct device *dev,
+				     struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	unsigned int val;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	val = !!val;
+	if (val == syscon->dolce_usb_power)
+		return count;
+
+	ret = syscon->short_command_write(syscon, 0x8c5, val, 2);
+	if (ret)
+		return ret;
+
+	syscon->dolce_usb_power = val;
+	dev_info(dev, "Dolce USB power rail %s\n", val ? "on" : "off");
+
+	return count;
+}
+
+static DEVICE_ATTR_RW(dolce_usb_power);
+
 static struct attribute *vita_syscon_attrs[] = {
 	&dev_attr_wlan_power.attr,
+	&dev_attr_dolce_usb_power.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vita_syscon);
@@ -640,6 +685,11 @@ static int vita_syscon_reboot_notify(struct notifier_block *nb,
 	 */
 	vita_syscon_short_command_write(syscon, 0x89B, 0, 2);  /* MSIF */
 	vita_syscon_short_command_write(syscon, 0x888, 0, 2);  /* game card */
+
+	if (syscon->dolce_usb_power) {
+		vita_syscon_short_command_write(syscon, 0x8c5, 0, 2);
+		syscon->dolce_usb_power = 0;
+	}
 
 	if (syscon->wlan_power)
 		vita_syscon_wlan_power_off(syscon);

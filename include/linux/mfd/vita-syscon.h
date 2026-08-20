@@ -48,6 +48,8 @@ struct vita_syscon {
 	/* WiFi power state */
 	int wlan_power;
 	struct mutex wlan_mutex;
+	/* PSTV (Dolce) external USB 5 V rail state */
+	int dolce_usb_power;
 	struct i2c_adapter *clockgen_i2c;
 	/* Reboot */
 	struct notifier_block reboot_nb;
