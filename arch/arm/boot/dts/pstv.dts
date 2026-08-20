@@ -13,7 +13,7 @@
 
 / {
 	chosen {
-		bootargs = "earlyprintk keep_bootcon console=ttyS0,115200 console=tty0 clk-vita-pervasive.buses_mask=0x6";
+		bootargs = "earlyprintk keep_bootcon console=ttyS0,115200 console=tty0 clk-vita-pervasive.buses_mask=0x5";
 
 		framebuffer0: framebuffer@20000000 {
 			compatible = "simple-framebuffer";
