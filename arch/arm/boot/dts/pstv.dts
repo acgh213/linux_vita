@@ -46,12 +46,14 @@
 	status = "okay";
 };
 
-/* USB host (EHCI-only; see the OHCI note in vita.dtsi).  All three buses
- * enabled for bring-up: the internal SMSC USB-Ethernet and the Type-A
- * port are believed to sit on bus 0 or bus 1 (neither had ever been
- * driven before 2026-08-19), bus 2 is the OTG bus the 2026-08-18
- * EHCI/OHCI campaign studied. */
+/* USB host: bus 0 is the external Type-A port; bus 2 carries the internal
+ * Realtek Ethernet controller.  Bus 0 needs its OHCI companion for full- and
+ * low-speed devices; high-speed devices enumerate directly through EHCI. */
 &ehci0 {
+	status = "okay";
+};
+
+&ohci0 {
 	status = "okay";
 };
 

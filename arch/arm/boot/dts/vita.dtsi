@@ -299,13 +299,12 @@
 		 * EHCI 1.0 spec, and SceUsbd registers ISRs at VitaOS
 		 * codes 146/148/150 -> GIC_SPI 114/116/118 (code - 32).
 		 *
-		 * The OHCI companions are deliberately NOT described: their
-		 * register window (+0x200) only decodes under firmware-side
-		 * conditions Linux has not reproduced, and probing it
-		 * external-aborts and poisons the whole bus page until the
-		 * next power cycle (one-way).  Do not add ohci-platform
-		 * nodes for these buses until that decode gate is
-		 * understood.
+		 * An OHCI companion window must not be touched before that bus
+		 * is host-latched and its EHCI core is running: an early read
+		 * external-aborts and poisons the bus page until power cycle.
+		 * Bus 0 met that gate on PSTV cycle 23b: E40E FRINDEX advanced,
+		 * then E40E0200 returned HcRevision 0x10 without poisoning EHCI.
+		 * Keep the unproven bus 1/2 companions undescribed.
 		 *
 		 * Pervasive wiring per bus: gate 0xE3102090/94/98 (clock
 		 * ids 0/1/2, mask 0xF) and reset index 36/37/38 (mask 0xF).
@@ -322,6 +321,15 @@
 			interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&pervasive_clk VITA_PCLK_USB0>;
 			resets = <&reset ((0xf << 16) | 36)>;
+			companion = <&ohci0>;
+			status = "disabled";
+		};
+
+		ohci0: usb@e40e0200 {
+			compatible = "generic-ohci";
+			reg = <0xe40e0200 0x100>;
+			interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&pervasive_clk VITA_PCLK_USB0>;
 			status = "disabled";
 		};
 
