@@ -47,6 +47,7 @@ properties:
               - ingenic,jz4740-ohci
               - rockchip,rk3588-ohci
               - snps,hsdk-v1.0-ohci
+              - sony,vita-ohci
           - const: generic-ohci
       - enum:
           - generic-ohci
