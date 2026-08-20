@@ -18,7 +18,7 @@
 		framebuffer0: framebuffer@20000000 {
 			compatible = "simple-framebuffer";
 			reg = <0x20000000 (1280*720*4)>;
-			width = <1280>;
+		width = <1280>;
 			height = <720>;
 			stride = <(1280*4)>;
 			format = "a8b8g8r8";
@@ -53,6 +53,14 @@
  * EHCI/OHCI campaign studied. */
 &ehci0 {
 	status = "okay";
+};
+
+/* The PSTV (Dolce) has no touch panel. Probing the syscon touchscreen
+ * on it issues Ernie touch commands with no hardware behind them,
+ * which wedges the console during boot (observed 2026-08-19, c17).
+ */
+&syscon_ts {
+	status = "disabled";
 };
 
 &ehci1 {

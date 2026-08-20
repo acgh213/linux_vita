@@ -250,7 +250,7 @@
 
 				tx-gpios = <&gpio0 3 GPIO_ACTIVE_LOW>;
 
-				syscon-ts {
+				syscon_ts: syscon-ts {
 					compatible = "vita,syscon-ts";
 				};
 
