@@ -28,14 +28,19 @@
  *   flag [0xE3100084 + bus*4]  = 0          (HOST mode select, latched parked)
  *   clk  [0xE3102090 + bus*4] |= 9          (host clocks)
  *   reset[0xE3101090 + bus*4] &= ~9         (release; leaves 0x2)
- *   poll PHY ready (0xE3110F30 bit 2), 5 s budget
+ *   poll PHY ready (0xE3110F30 bit bus), 5 s budget
  *
- * This was proven on silicon by the cycle-10 userspace repro (hostmode.c):
- * afterwards FRINDEX advances, the +0x200 OHCI window decodes, and the PSTV's
- * internal Ethernet NIC enumerates into a working eth0.  Only bus 2 carries
- * the sequence for now: its PHY page (0xE3110000, ready bit at +0xF30) is the
- * only one located so far.  Buses 0/1 keep plain gate behaviour until their
- * PHY pages are mapped.
+ * This was proven on silicon for bus 2 by the cycle-10 userspace repro
+ * (hostmode.c): afterwards FRINDEX advances, the +0x200 OHCI window decodes,
+ * and the PSTV's internal Ethernet NIC enumerates into a working eth0.
+ * Offline usbserv/SceUdcd analysis then showed that all ports share the PHY
+ * page at 0xE3110000: +0xF30 uses bit N for bus N.  Cycle 13c proved bus 1
+ * kernel-early host latching safe and its EHCI core advancing; an idle root
+ * hub merely runtime-suspends and freezes FRINDEX until resumed.
+ *
+ * Keep bus 2 as the default and opt additional buses in from the kernel
+ * command line, one at a time.  The all-bus 0x7 case remains unvalidated and
+ * must not be folded into this bus-1 experiment.
  */
 
 #include <linux/clk-provider.h>
@@ -55,9 +60,15 @@ struct vita_pervasive_gate_def {
 	bool hostmode;	/* carry the Sony host-mode latch in .prepare */
 };
 
+/* Bit N selects Sony USB bus N for the host-mode park-window sequence. */
+static unsigned int buses_mask = 0x4;
+module_param(buses_mask, uint, 0444);
+MODULE_PARM_DESC(buses_mask,
+		 "USB buses carrying the host-mode latch (default 0x4 = bus 2)");
+
 static const struct vita_pervasive_gate_def vita_pervasive_gates[VITA_PCLK_NR] = {
-	[VITA_PCLK_USB0] = { "usb0", 0x090 / 4, 0xf, false },
-	[VITA_PCLK_USB1] = { "usb1", 0x094 / 4, 0xf, false },
+	[VITA_PCLK_USB0] = { "usb0", 0x090 / 4, 0xf, true },
+	[VITA_PCLK_USB1] = { "usb1", 0x094 / 4, 0xf, true },
 	[VITA_PCLK_USB2] = { "usb2", 0x098 / 4, 0xf, true },
 };
 
@@ -67,6 +78,7 @@ struct vita_pervasive_clk {
 	void __iomem *reset_reg;	/* reset control register (hostmode) */
 	void __iomem *flag_reg;		/* pervasive mode flag (hostmode) */
 	void __iomem *phy_reg;		/* PHY ready register (hostmode) */
+	u32 phy_bit;			/* ready bit in shared PHY register */
 	u32 mask;
 	spinlock_t *lock;
 };
@@ -104,16 +116,16 @@ static int vita_pervasive_clk_prepare(struct clk_hw *hw)
 	msleep(100);
 	writel((reset_v | 0xB) & ~9, gate->reset_reg);	/* release, 0x2 */
 
-	/* PHY ready: bit 2, 5 s budget (Sony polls up to 2000 tries). */
+	/* PHY ready: bit N for bus N, 5 s budget. */
 	for (i = 0; i < 250; i++) {
-		if (readl(gate->phy_reg) & 0x4)
+		if (readl(gate->phy_reg) & gate->phy_bit)
 			break;
 		msleep(20);
 	}
 
 	pr_info("vita pervasive %s: host mode latched, PHY %s after %d ms (F30=%#x)\n",
 		clk_hw_get_name(hw),
-		(readl(gate->phy_reg) & 0x4) ? "ready" : "NOT ready",
+		(readl(gate->phy_reg) & gate->phy_bit) ? "ready" : "NOT ready",
 		i * 20, readl(gate->phy_reg));
 
 	return 0;
@@ -218,10 +230,11 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 		priv->gates[i].reg = priv->gate_base + def->idx * 4;
 		priv->gates[i].mask = def->mask;
 		priv->gates[i].lock = &priv->lock;
-		if (def->hostmode) {
+		if (def->hostmode && (buses_mask & (1U << i))) {
 			priv->gates[i].reset_reg = priv->reset_base + 0x090 + i * 4;
 			priv->gates[i].flag_reg = priv->flags_base + 0x084 + i * 4;
 			priv->gates[i].phy_reg = priv->phy_base + 0xF30;
+			priv->gates[i].phy_bit = 1U << i;
 		}
 		priv->gates[i].hw.init = &init;
 
