@@ -325,6 +325,13 @@
 			status = "disabled";
 		};
 
+		ohci0_proof: usb@e40e0200 {
+			compatible = "sony,vita-ohci-proof";
+			reg = <0xe40e0200 0x100>;
+			sony,ehci = <&ehci0>;
+			status = "disabled";
+		};
+
 		ehci1: usb@e40b0000 {
 			compatible = "generic-ehci";
 			reg = <0xe40b0000 0x100>;

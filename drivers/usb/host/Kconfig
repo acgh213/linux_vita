@@ -559,6 +559,16 @@ config USB_OHCI_HCD_PLATFORM
 
 	  If unsure, say N.
 
+config USB_OHCI_VITA_PROOF
+	tristate "PS Vita OHCI safe-first-touch diagnostic"
+	depends on ARCH_VITA && USB_EHCI_HCD_PLATFORM
+	help
+	  Lab-only diagnostic which waits for the paired EHCI controller to be
+	  bound and actively advancing frames, then reads only the OHCI revision
+	  register.  It performs no OHCI writes and registers no USB HCD.
+
+	  If unsure, say N.
+
 config USB_OCTEON_OHCI
 	bool "Octeon on-chip OHCI support (DEPRECATED)"
 	depends on CAVIUM_OCTEON_SOC

@@ -55,6 +55,10 @@
 	status = "okay";
 };
 
+&ohci0_proof {
+	status = "okay";
+};
+
 /* The PSTV (Dolce) has no touch panel. Probing the syscon touchscreen
  * on it issues Ernie touch commands with no hardware behind them,
  * which wedges the console during boot (observed 2026-08-19, c17).
