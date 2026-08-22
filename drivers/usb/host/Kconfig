@@ -559,6 +559,20 @@ config USB_OHCI_HCD_PLATFORM
 
 	  If unsure, say N.
 
+config USB_VITA_DOLCE_POWER
+	tristate "PSTV external Type-A USB power sequencer"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on MFD_VITA_SYSCON && GPIOLIB && USB_EHCI_HCD_PLATFORM
+	help
+	  The PlayStation TV's external USB-A socket is powered by an Ernie
+	  syscon rail plus a GPIO, neither of which the host controller
+	  touches.  This driver applies both, in order, once the socket's
+	  EHCI controller has finished probing.
+
+	  Without it the port stays dead and no device on it enumerates.
+
+	  If unsure, say N.
+
 config USB_OCTEON_OHCI
 	bool "Octeon on-chip OHCI support (DEPRECATED)"
 	depends on CAVIUM_OCTEON_SOC
