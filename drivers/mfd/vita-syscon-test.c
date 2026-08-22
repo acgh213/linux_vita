@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <kunit/test.h>
+#include <linux/completion.h>
+#include <linux/device.h>
 #include <linux/errno.h>
+#include <linux/i2c.h>
+#include <linux/mutex.h>
+#include <linux/notifier.h>
+#include <linux/spi/spi.h>
+
+#include <linux/mfd/vita-syscon.h>
 
 #include "vita-syscon-internal.h"
 
@@ -237,6 +245,157 @@ static void syscon_payload_status_result_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dest[0], 0xa5);
 }
 
+/*
+ * PSTV (Dolce) external USB 5 V rail helper.
+ *
+ * The wire format is not negotiable: VitaOS's ksceSysconCtrlDolceUsbPower()
+ * is short command 0x8c5 with a one-byte boolean payload and a total request
+ * length of 2.  These tests pin the command, the payload, the length, and the
+ * idempotency the sequencer relies on, using a stub transport in place of the
+ * SPI link to Ernie.
+ */
+struct syscon_rail_stub {
+	unsigned int calls;
+	u16 last_cmd;
+	u32 last_data;
+	int last_cmd_len;
+	int result;
+};
+
+static struct syscon_rail_stub rail_stub;
+
+static int syscon_rail_stub_write(struct vita_syscon *syscon, u16 cmd, u32 data,
+				  int cmd_len)
+{
+	rail_stub.calls++;
+	rail_stub.last_cmd = cmd;
+	rail_stub.last_data = data;
+	rail_stub.last_cmd_len = cmd_len;
+
+	return rail_stub.result;
+}
+
+static void syscon_rail_init(struct vita_syscon *syscon)
+{
+	memset(&rail_stub, 0, sizeof(rail_stub));
+	memset(syscon, 0, sizeof(*syscon));
+	mutex_init(&syscon->dolce_usb_mutex);
+	syscon->short_command_write = syscon_rail_stub_write;
+}
+
+static void syscon_dolce_rail_on_uses_exact_wire_format_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true), 0);
+	KUNIT_EXPECT_EQ(test, rail_stub.calls, 1u);
+	KUNIT_EXPECT_EQ(test, rail_stub.last_cmd, (u16)0x8c5);
+	KUNIT_EXPECT_EQ(test, rail_stub.last_data, 1u);
+	KUNIT_EXPECT_EQ(test, rail_stub.last_cmd_len, 2);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 1);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
+static void syscon_dolce_rail_off_sends_zero_payload_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+	KUNIT_ASSERT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true), 0);
+
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, false), 0);
+	KUNIT_EXPECT_EQ(test, rail_stub.calls, 2u);
+	KUNIT_EXPECT_EQ(test, rail_stub.last_cmd, (u16)0x8c5);
+	KUNIT_EXPECT_EQ(test, rail_stub.last_data, 0u);
+	KUNIT_EXPECT_EQ(test, rail_stub.last_cmd_len, 2);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 0);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
+static void syscon_dolce_rail_repeat_is_idempotent_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+	KUNIT_ASSERT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true), 0);
+
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true), 0);
+	KUNIT_EXPECT_EQ(test, rail_stub.calls, 1u);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
+static void syscon_dolce_rail_off_when_already_off_is_idempotent_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, false), 0);
+	KUNIT_EXPECT_EQ(test, rail_stub.calls, 0u);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
+static void syscon_dolce_rail_transport_error_keeps_state_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+	rail_stub.result = -EBUSY;
+
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true),
+			-EBUSY);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 0);
+
+	/*
+	 * A failed rail-on must not latch the cached state: the next attempt
+	 * has to reach the hardware again, not be swallowed as a no-op.
+	 */
+	rail_stub.result = 0;
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true), 0);
+	KUNIT_EXPECT_EQ(test, rail_stub.calls, 2u);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 1);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
+static void syscon_dolce_rail_off_failure_keeps_state_on_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+	KUNIT_ASSERT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true), 0);
+
+	/*
+	 * Rail-off is the shutdown path.  If a failure there cleared the
+	 * cached state, the retry would be swallowed as a no-op and the rail
+	 * would be left on.
+	 */
+	rail_stub.result = -EBUSY;
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, false),
+			-EBUSY);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 1);
+
+	rail_stub.result = 0;
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, false), 0);
+	KUNIT_EXPECT_EQ(test, rail_stub.calls, 3u);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 0);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
+static void syscon_dolce_rail_missing_transport_test(struct kunit *test)
+{
+	struct vita_syscon syscon;
+
+	syscon_rail_init(&syscon);
+	syscon.short_command_write = NULL;
+
+	KUNIT_EXPECT_EQ(test, vita_syscon_dolce_usb_power_set(&syscon, true),
+			-ENODEV);
+	KUNIT_EXPECT_EQ(test, syscon.dolce_usb_power, 0);
+	mutex_destroy(&syscon.dolce_usb_mutex);
+}
+
 static struct kunit_case syscon_policy_test_cases[] = {
 	KUNIT_CASE(syscon_henkaku_version_frame_test),
 	KUNIT_CASE(syscon_busy_frame_test),
@@ -258,6 +417,13 @@ static struct kunit_case syscon_policy_test_cases[] = {
 	KUNIT_CASE(syscon_payload_propagates_validation_error_test),
 	KUNIT_CASE(syscon_payload_busy_result_test),
 	KUNIT_CASE(syscon_payload_status_result_test),
+	KUNIT_CASE(syscon_dolce_rail_on_uses_exact_wire_format_test),
+	KUNIT_CASE(syscon_dolce_rail_off_sends_zero_payload_test),
+	KUNIT_CASE(syscon_dolce_rail_repeat_is_idempotent_test),
+	KUNIT_CASE(syscon_dolce_rail_off_when_already_off_is_idempotent_test),
+	KUNIT_CASE(syscon_dolce_rail_transport_error_keeps_state_test),
+	KUNIT_CASE(syscon_dolce_rail_off_failure_keeps_state_on_test),
+	KUNIT_CASE(syscon_dolce_rail_missing_transport_test),
 	{}
 };
 

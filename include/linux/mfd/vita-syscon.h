@@ -50,6 +50,8 @@ struct vita_syscon {
 	struct mutex wlan_mutex;
 	/* PSTV (Dolce) external USB 5 V rail state */
 	int dolce_usb_power;
+	/* Serialises the rail against sysfs, the sequencer, and reboot */
+	struct mutex dolce_usb_mutex;
 	struct i2c_adapter *clockgen_i2c;
 	/* Reboot */
 	struct notifier_block reboot_nb;
@@ -63,6 +65,13 @@ void sdhci_vita_trigger_rescan(int bus_index);
 /* WLAN power helpers -- used by pwrseq-vita-wlan and sysfs */
 int vita_syscon_wlan_power_on(struct vita_syscon *syscon);
 int vita_syscon_wlan_power_off(struct vita_syscon *syscon);
+
+/*
+ * PSTV (Dolce) external USB 5 V rail -- used by the Type-A VBUS sequencer
+ * and by the diagnostic sysfs attribute.  Only this specific helper is
+ * exported; the generic command transport deliberately is not.
+ */
+int vita_syscon_dolce_usb_power_set(struct vita_syscon *syscon, bool on);
 
 int vita_syscon_validated_read(struct vita_syscon *syscon, u16 cmd,
 			       void *dest, size_t dest_capacity);

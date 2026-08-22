@@ -335,7 +335,54 @@ static DEVICE_ATTR_RW(wlan_power);
  * boolean payload (command length 2).  Keep this deliberately specific:
  * exposing the generic syscon command transport would permit unrelated
  * hardware writes from userspace.
+ *
+ * The rail alone does not power the external Type-A socket -- GPIO1 pin 3
+ * must also be switched to output and asserted.  See the PSTV VBUS
+ * sequencer, which owns that ordering.
  */
+#define SYSCON_CMD_DOLCE_USB_POWER	0x8c5
+
+/**
+ * vita_syscon_dolce_usb_power_set - switch the PSTV external USB 5 V rail
+ * @syscon: the vita_syscon instance
+ * @on: requested rail state
+ *
+ * Idempotent: a request matching the cached state issues no command.  The
+ * cached state is only updated once Ernie has accepted the command, so a
+ * failed request leaves the next attempt free to reach the hardware.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vita_syscon_dolce_usb_power_set(struct vita_syscon *syscon, bool on)
+{
+	int ret = 0;
+
+	if (!syscon->short_command_write)
+		return -ENODEV;
+
+	mutex_lock(&syscon->dolce_usb_mutex);
+
+	if (syscon->dolce_usb_power == on)
+		goto out;
+
+	ret = syscon->short_command_write(syscon, SYSCON_CMD_DOLCE_USB_POWER,
+					  on, 2);
+	if (ret) {
+		dev_err(syscon->dev, "Dolce USB rail %s failed: %d\n",
+			on ? "on" : "off", ret);
+		goto out;
+	}
+
+	syscon->dolce_usb_power = on;
+	dev_info(syscon->dev, "Dolce USB power rail %s\n", on ? "on" : "off");
+
+out:
+	mutex_unlock(&syscon->dolce_usb_mutex);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(vita_syscon_dolce_usb_power_set);
+
 static ssize_t dolce_usb_power_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -356,16 +403,9 @@ static ssize_t dolce_usb_power_store(struct device *dev,
 	if (ret)
 		return ret;
 
-	val = !!val;
-	if (val == syscon->dolce_usb_power)
-		return count;
-
-	ret = syscon->short_command_write(syscon, 0x8c5, val, 2);
+	ret = vita_syscon_dolce_usb_power_set(syscon, !!val);
 	if (ret)
 		return ret;
-
-	syscon->dolce_usb_power = val;
-	dev_info(dev, "Dolce USB power rail %s\n", val ? "on" : "off");
 
 	return count;
 }
@@ -686,10 +726,7 @@ static int vita_syscon_reboot_notify(struct notifier_block *nb,
 	vita_syscon_short_command_write(syscon, 0x89B, 0, 2);  /* MSIF */
 	vita_syscon_short_command_write(syscon, 0x888, 0, 2);  /* game card */
 
-	if (syscon->dolce_usb_power) {
-		vita_syscon_short_command_write(syscon, 0x8c5, 0, 2);
-		syscon->dolce_usb_power = 0;
-	}
+	vita_syscon_dolce_usb_power_set(syscon, false);
 
 	if (syscon->wlan_power)
 		vita_syscon_wlan_power_off(syscon);
@@ -757,6 +794,7 @@ static int vita_syscon_probe(struct spi_device *spi)
 
 	init_completion(&syscon->rx_irq);
 	mutex_init(&syscon->wlan_mutex);
+	mutex_init(&syscon->dolce_usb_mutex);
 
 	spi_set_drvdata(spi, syscon);
 	syscon->dev = &spi->dev;
