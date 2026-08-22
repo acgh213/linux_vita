@@ -31,6 +31,11 @@
 	status = "okay";
 };
 
+/* GPIO1 pin 3 is the external Type-A port's VBUS enable on this board. */
+&gpio1 {
+	status = "okay";
+};
+
 /* I2C1 has ADV7533 HDMI transmitter (0x38, 0x3D-0x3F) — disabled until
  * a driver is written. Also has motion sensor (0x0C) and LCD brightness (0x64). */
 
@@ -46,11 +51,12 @@
 	status = "okay";
 };
 
-/* USB host (EHCI-only; see the OHCI note in vita.dtsi).  All three buses
- * enabled for bring-up: the internal SMSC USB-Ethernet and the Type-A
- * port are believed to sit on bus 0 or bus 1 (neither had ever been
- * driven before 2026-08-19), bus 2 is the OTG bus the 2026-08-18
- * EHCI/OHCI campaign studied. */
+/* USB host (EHCI-only; see the OHCI note in vita.dtsi).  Bus 0 is the
+ * external Type-A port and bus 2 carries the internal Realtek 0bda:8152
+ * USB-Ethernet adapter; both were identified on hardware in 2026-08.  No
+ * attachment has been found on bus 1, which stays enabled only until that
+ * is confirmed.
+ */
 &ehci0 {
 	status = "okay";
 };
@@ -69,4 +75,17 @@
 
 &ehci2 {
 	status = "okay";
+};
+
+/ {
+	/* The external Type-A socket is on Sony bus 0 (&ehci0).  It stays
+	 * dead until both the Dolce 5 V rail and GPIO1 pin 3 are asserted,
+	 * which this node's driver does once &ehci0 has finished probing.
+	 */
+	usb0_power: usb0-power {
+		compatible = "vita,dolce-usb-power";
+		vita,syscon = <&syscon>;
+		vita,ehci = <&ehci0>;
+		enable-gpios = <&gpio1 3 GPIO_ACTIVE_HIGH>;
+	};
 };
