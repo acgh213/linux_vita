@@ -34,6 +34,16 @@ int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
 		return -ENOMEM;
 	}
 
+	/* SMP DIAGNOSTIC (vita): W = CPU0 is about to write this CPU's
+	 * mailbox slot. Scratch through the same ioremap SRAM window. */
+	{
+		void __iomem *diag = ioremap(0x1F007F98, 4);
+		if (diag) {
+			writel(0x57000000 | cpu, diag);
+			iounmap(diag);
+		}
+	}
+
 	writel_relaxed(__pa_symbol(secondary_startup), boot_addr);
 
 	/* Ensure the write is visible to the secondary core */

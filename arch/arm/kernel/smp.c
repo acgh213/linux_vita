@@ -449,6 +449,16 @@ asmlinkage void secondary_start_kernel(struct task_struct *task)
 	if (smp_ops.smp_secondary_init)
 		smp_ops.smp_secondary_init(cpu);
 
+	/* SMP DIAGNOSTIC (vita): S = reached smp_secondary_init in C. */
+	{
+		void __iomem *diag;
+		diag = ioremap(0x1F007F9C, 4);
+		if (diag) {
+			writel(0x53000000 | cpu, diag);
+			iounmap(diag);
+		}
+	}
+
 	notify_cpu_starting(cpu);
 
 	ipi_setup(cpu);
