@@ -11,9 +11,15 @@
 #include <linux/pm_runtime.h>
 #include <linux/spinlock.h>
 
+/*
+ * In the register a set bit means output, which is what bgpio_init() below
+ * expects for its dirout argument.  The two values under it are VitaOS's
+ * ksceGpioSetPortMode() API constants, which run the other way round; they
+ * are not register values and must not be used as such.
+ */
 #define VITA_GPIO_DIRECTION		0x00
-#define  VITA_GPIO_DIRECTION_OUT	0
-#define  VITA_GPIO_DIRECTION_IN		1
+#define  VITA_GPIO_MODE_OUT		0
+#define  VITA_GPIO_MODE_IN		1
 #define VITA_GPIO_READ			0x04
 #define VITA_GPIO_SET			0x08
 #define VITA_GPIO_CLEAR			0x0C
@@ -211,31 +217,43 @@ static int vita_gpio_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	vgpio->rst = devm_reset_control_get_exclusive(dev, NULL);
+	vgpio->rst = devm_reset_control_get_optional_exclusive(dev, NULL);
 	if (IS_ERR(vgpio->rst)) {
 		ret = PTR_ERR(vgpio->rst);
 		goto err_disable_clk;
 	}
 	reset_control_deassert(vgpio->rst);
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq <= 0)
-		return irq ? irq : -ENODEV;
-
-	girq = &vgpio->gc.irq;
-	girq->chip = &vita_gpio_irqchip;
-	girq->parent_handler = vita_gpio_irq_handler;
-	girq->num_parents = 1;
-	girq->parents = devm_kcalloc(dev, 1,
-				     sizeof(*girq->parents),
-				     GFP_KERNEL);
-	if (!girq->parents) {
-		ret = -ENOMEM;
+	/*
+	 * Output-only banks describe neither a reset nor an interrupt
+	 * parent.  The PSTV's GPIO1 bank drives the external Type-A VBUS
+	 * enable on pin 3, but its interrupt routing has never been
+	 * identified, so it is described without one.  Register the IRQ
+	 * chip only when the firmware actually supplies an interrupt;
+	 * such a bank still provides plain input/output GPIOs.
+	 */
+	irq = platform_get_irq_optional(pdev, 0);
+	if (irq < 0 && irq != -ENXIO) {
+		ret = irq;
 		goto err_reset;
 	}
-	girq->parents[0] = irq;
-	girq->default_type = IRQ_TYPE_NONE;
-	girq->handler = handle_level_irq;
+
+	if (irq > 0) {
+		girq = &vgpio->gc.irq;
+		girq->chip = &vita_gpio_irqchip;
+		girq->parent_handler = vita_gpio_irq_handler;
+		girq->num_parents = 1;
+		girq->parents = devm_kcalloc(dev, 1,
+					     sizeof(*girq->parents),
+					     GFP_KERNEL);
+		if (!girq->parents) {
+			ret = -ENOMEM;
+			goto err_reset;
+		}
+		girq->parents[0] = irq;
+		girq->default_type = IRQ_TYPE_NONE;
+		girq->handler = handle_level_irq;
+	}
 
 	ret = devm_gpiochip_add_data(dev, &vgpio->gc, vgpio);
 	if (ret < 0) {

@@ -1098,9 +1098,11 @@ config MFD_VITA_SYSCON
 config MFD_VITA_SYSCON_KUNIT_TEST
 	tristate "PlayStation Vita Syscon policy KUnit tests" if !KUNIT_ALL_TESTS
 	depends on KUNIT
+	depends on MFD_VITA_SYSCON
 	default KUNIT_ALL_TESTS
 	help
-	  Test PlayStation Vita Syscon frame validation and result policy.
+	  Test PlayStation Vita Syscon frame validation, result policy, and
+	  the PSTV USB rail helper.
 
 config MFD_NTXEC
 	tristate "Netronix embedded controller (EC)"
