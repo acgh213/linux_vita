@@ -38,11 +38,13 @@
  * kernel-early host latching safe and its EHCI core advancing; an idle root
  * hub merely runtime-suspends and freezes FRINDEX until resumed.
  *
- * Keep bus 2 as the default and opt additional buses in from the kernel
- * command line, one at a time.  The all-bus 0x7 case remains unvalidated and
- * must not be folded into this bus-1 experiment.
+ * Keep bus 2 as the default.  Boards opt into additional buses through the
+ * clock provider's Device Tree node, keeping the selection reviewable and
+ * independent of a mutable kernel command-line experiment.  The all-bus 0x7
+ * case remains unvalidated and is rejected.
  */
 
+#include <linux/bits.h>
 #include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -61,10 +63,8 @@ struct vita_pervasive_gate_def {
 };
 
 /* Bit N selects Sony USB bus N for the host-mode park-window sequence. */
-static unsigned int buses_mask = 0x4;
-module_param(buses_mask, uint, 0444);
-MODULE_PARM_DESC(buses_mask,
-		 "USB buses carrying the host-mode latch (default 0x4 = bus 2)");
+#define VITA_USB_HOSTMODE_MASK_DEFAULT	BIT(2)
+#define VITA_USB_HOSTMODE_MASK_ALL	GENMASK(2, 0)
 
 static const struct vita_pervasive_gate_def vita_pervasive_gates[VITA_PCLK_NR] = {
 	[VITA_PCLK_USB0] = { "usb0", 0x090 / 4, 0xf, true },
@@ -177,17 +177,48 @@ struct vita_pervasive {
 	struct clk_hw_onecell_data *onecell;
 };
 
+static int vita_pervasive_parse_hostmode_mask(struct device *dev, u32 *mask)
+{
+	u32 value;
+	int ret;
+
+	*mask = VITA_USB_HOSTMODE_MASK_DEFAULT;
+	ret = of_property_read_u32(dev->of_node, "vita,usb-hostmode-mask",
+				   &value);
+	if (ret == -EINVAL)
+		return 0;
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to read USB host-mode mask\n");
+	if (value & ~VITA_USB_HOSTMODE_MASK_ALL)
+		return dev_err_probe(dev, -EINVAL,
+				     "USB host-mode mask %#x selects an unknown bus\n",
+				     value);
+	if (value == VITA_USB_HOSTMODE_MASK_ALL)
+		return dev_err_probe(dev, -EINVAL,
+				     "USB host-mode mask %#x enables unvalidated buses\n",
+				     value);
+
+	*mask = value;
+	return 0;
+}
+
 static int vita_pervasive_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct vita_pervasive *priv;
 	struct resource *res;
+	u32 hostmode_mask;
 	unsigned int i;
 	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
+
+	ret = vita_pervasive_parse_hostmode_mask(dev, &hostmode_mask);
+	if (ret)
+		return ret;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	priv->flags_base = devm_ioremap_resource(dev, res);
@@ -230,7 +261,7 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 		priv->gates[i].reg = priv->gate_base + def->idx * 4;
 		priv->gates[i].mask = def->mask;
 		priv->gates[i].lock = &priv->lock;
-		if (def->hostmode && (buses_mask & (1U << i))) {
+		if (def->hostmode && (hostmode_mask & BIT(i))) {
 			priv->gates[i].reset_reg = priv->reset_base + 0x090 + i * 4;
 			priv->gates[i].flag_reg = priv->flags_base + 0x084 + i * 4;
 			priv->gates[i].phy_reg = priv->phy_base + 0xF30;
