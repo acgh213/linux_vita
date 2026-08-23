@@ -21,9 +21,10 @@
  *
  * Note that a bound EHCI controller does not by itself mean the SoC core
  * behind it is in host mode: clk-vita-pervasive only performs the host-mode
- * latch for buses named in its buses_mask, and bus 0 is not in the default
- * mask.  Powering the socket on a bus left in device mode is harmless -- the
- * port is simply dead -- but it is why the board must select bus 0.
+ * latch for buses named in its board-owned vita,usb-hostmode-mask property,
+ * and bus 0 is not in the safe default.  Powering the socket on a bus left
+ * in device mode is harmless -- the port is simply dead -- but it is why the
+ * PSTV board selects bus 0.
  */
 
 #include <linux/device.h>

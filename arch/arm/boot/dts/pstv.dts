@@ -13,7 +13,7 @@
 
 / {
 	chosen {
-		bootargs = "earlyprintk keep_bootcon console=ttyS0,115200 console=tty0 clk-vita-pervasive.buses_mask=0x5";
+		bootargs = "earlyprintk keep_bootcon console=ttyS0,115200 console=tty0";
 
 		framebuffer0: framebuffer@20000000 {
 			compatible = "simple-framebuffer";
@@ -36,6 +36,13 @@
 	status = "okay";
 };
 
+/* Bus 0 is the external Type-A port; bus 2 carries internal Realtek Ethernet.
+ * Bus 1 has no identified PSTV attachment, and all-bus 0x7 remains unvalidated.
+ */
+&pervasive_clk {
+	vita,usb-hostmode-mask = <0x5>;
+};
+
 /* I2C1 has ADV7533 HDMI transmitter (0x38, 0x3D-0x3F) — disabled until
  * a driver is written. Also has motion sensor (0x0C) and LCD brightness (0x64). */
 
@@ -53,9 +60,8 @@
 
 /* USB host (EHCI-only; see the OHCI note in vita.dtsi).  Bus 0 is the
  * external Type-A port and bus 2 carries the internal Realtek 0bda:8152
- * USB-Ethernet adapter; both were identified on hardware in 2026-08.  No
- * attachment has been found on bus 1, which stays enabled only until that
- * is confirmed.
+ * USB-Ethernet adapter; both were identified on hardware in 2026-08.  Bus 1
+ * has no identified attachment and is deliberately disabled on PSTV.
  */
 &ehci0 {
 	status = "okay";
@@ -70,7 +76,7 @@
 };
 
 &ehci1 {
-	status = "okay";
+	status = "disabled";
 };
 
 &ehci2 {
