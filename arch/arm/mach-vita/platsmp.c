@@ -23,7 +23,7 @@
 
 #define SECONDARY_STARTUP_ADDR	0x1F007F00
 
-int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
+static int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
 	void __iomem *boot_addr;
 	const u32 secondary_boot_addr = SECONDARY_STARTUP_ADDR + cpu * 4;
@@ -32,6 +32,14 @@ int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
 	if (!boot_addr) {
 		pr_warn("unable to ioremap boot address for cpu %u\n", cpu);
 		return -ENOMEM;
+	}
+
+	/* SMP DIAGNOSTIC (vita): W = CPU0 wrote this cpu's mailbox slot.
+	 * Scratched via the same ioremap SRAM window, after the slot write. */
+	{
+		void __iomem *diag = ioremap(0x1F007F98, 4);
+		if (diag)
+			writel(0x57000000 | cpu, diag);
 	}
 
 	writel_relaxed(__pa_symbol(secondary_startup), boot_addr);

@@ -12,6 +12,7 @@
 #define SYSCON_RESULT_SUCCESS	0x00
 #define SYSCON_RESULT_BUSY	0x80
 #define SYSCON_RESULT_BUSY_ALT	0x81
+#define SYSCON_RESULT_BUSY_ALT2	0x82
 
 #define SYSCON_MAX_ATTEMPTS	16
 
@@ -54,7 +55,8 @@ static inline int syscon_result_policy(u8 result, unsigned int attempt)
 	if (result == SYSCON_RESULT_SUCCESS)
 		return 0;
 
-	if (result == SYSCON_RESULT_BUSY || result == SYSCON_RESULT_BUSY_ALT)
+	if (result == SYSCON_RESULT_BUSY || result == SYSCON_RESULT_BUSY_ALT ||
+	    result == SYSCON_RESULT_BUSY_ALT2)
 		return attempt < SYSCON_MAX_ATTEMPTS ? SYSCON_RESULT_RETRY :
 			-EBUSY;
 

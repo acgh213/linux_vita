@@ -108,6 +108,9 @@ static void syscon_busy_result_retries_below_max_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			syscon_result_policy(0x81, SYSCON_MAX_ATTEMPTS - 1),
 			SYSCON_RESULT_RETRY);
+	KUNIT_EXPECT_EQ(test,
+			syscon_result_policy(0x82, SYSCON_MAX_ATTEMPTS - 1),
+			SYSCON_RESULT_RETRY);
 }
 
 static void syscon_busy_result_stops_at_max_test(struct kunit *test)
@@ -116,6 +119,8 @@ static void syscon_busy_result_stops_at_max_test(struct kunit *test)
 			syscon_result_policy(0x80, SYSCON_MAX_ATTEMPTS), -EBUSY);
 	KUNIT_EXPECT_EQ(test,
 			syscon_result_policy(0x81, SYSCON_MAX_ATTEMPTS), -EBUSY);
+	KUNIT_EXPECT_EQ(test,
+			syscon_result_policy(0x82, SYSCON_MAX_ATTEMPTS), -EBUSY);
 }
 
 static void syscon_unknown_result_fails_test(struct kunit *test)

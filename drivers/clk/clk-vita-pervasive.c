@@ -32,10 +32,24 @@
  *
  * This was proven on silicon by the cycle-10 userspace repro (hostmode.c):
  * afterwards FRINDEX advances, the +0x200 OHCI window decodes, and the PSTV's
- * internal Ethernet NIC enumerates into a working eth0.  Only bus 2 carries
- * the sequence for now: its PHY page (0xE3110000, ready bit at +0xF30) is the
- * only one located so far.  Buses 0/1 keep plain gate behaviour until their
- * PHY pages are mapped.
+ * internal Ethernet NIC enumerates into a working eth0.
+ *
+ * Bus-uniform (2026-08-19 cycle 12, lab/usb-re/HOSTBUS-2026-08-19.md):
+ * usbserv carries per-bus near-clones of the host choreography (0x81001150
+ * bus0, 0x810011f6 bus1, 0x81001b4e bus2) with identical constants, and the
+ * SceUdcd cable dispatcher (0x81005b0e) decodes the PHY page as one shared
+ * window at 0xE3110000: [F34] is a one-hot port-select strobe and [F30] bit
+ * (1 << bus) is that port's ready bit -- there is no separate bus-0/1 PHY
+ * page.  Proven on bus 1 by the cycle-12 userspace repro (hostbus.c 1):
+ * end-state gate=9/reset=0x2/flag=0, PHY ready 0 ms, FRINDEX advancing,
+ * OHCI +0x200 decoding.
+ *
+ * All-bus latch wedged the box at cycle 12b (dark, no SSH; buses 0+1+2
+ * together at kernel-early time recreates the 08-17 trap).  The mask is
+ * therefore opt-in per bus on the kernel command line, one bus at a time:
+ *   vita_pervasive.buses=0x4   bus 2 only (default, 11b-proven safe)
+ *   vita_pervasive.buses=0x6   bus 2 + bus 1 (cycle 12 userspace-proven)
+ *   vita_pervasive.buses=0x7   all buses (wedged 2026-08-19, do not use)
  */
 
 #include <linux/clk-provider.h>
@@ -55,9 +69,18 @@ struct vita_pervasive_gate_def {
 	bool hostmode;	/* carry the Sony host-mode latch in .prepare */
 };
 
+/*
+ * Buses to carry the host latch, opt-in: bit N = bus N.  Default 0x4 (bus 2
+ * only, cycle-11b-proven).  One new bus at a time on the cmdline; 0x7 wedged
+ * the box (cycle 12b, 08-17 buses-together trap).
+ */
+static unsigned int buses_mask = 0x4;
+module_param(buses_mask, uint, 0444);
+MODULE_PARM_DESC(buses_mask, "USB buses carrying host-mode latch (bit N = bus N; default 0x4 = bus 2)");
+
 static const struct vita_pervasive_gate_def vita_pervasive_gates[VITA_PCLK_NR] = {
-	[VITA_PCLK_USB0] = { "usb0", 0x090 / 4, 0xf, false },
-	[VITA_PCLK_USB1] = { "usb1", 0x094 / 4, 0xf, false },
+	[VITA_PCLK_USB0] = { "usb0", 0x090 / 4, 0xf, true },
+	[VITA_PCLK_USB1] = { "usb1", 0x094 / 4, 0xf, true },
 	[VITA_PCLK_USB2] = { "usb2", 0x098 / 4, 0xf, true },
 };
 
@@ -67,7 +90,9 @@ struct vita_pervasive_clk {
 	void __iomem *reset_reg;	/* reset control register (hostmode) */
 	void __iomem *flag_reg;		/* pervasive mode flag (hostmode) */
 	void __iomem *phy_reg;		/* PHY ready register (hostmode) */
+	void __iomem *vbus_reg;		/* GPIO1 block, VBUS drive (bus 1 only) */
 	u32 mask;
+	u32 phy_bit;		/* per-port ready bit in F30 (hostmode) */
 	spinlock_t *lock;
 };
 
@@ -104,17 +129,35 @@ static int vita_pervasive_clk_prepare(struct clk_hw *hw)
 	msleep(100);
 	writel((reset_v | 0xB) & ~9, gate->reset_reg);	/* release, 0x2 */
 
-	/* PHY ready: bit 2, 5 s budget (Sony polls up to 2000 tries). */
+	/* PHY ready: bit (1 << bus), 5 s budget (Sony polls up to 2000 tries). */
 	for (i = 0; i < 250; i++) {
-		if (readl(gate->phy_reg) & 0x4)
+		if (readl(gate->phy_reg) & gate->phy_bit)
 			break;
 		msleep(20);
 	}
 
 	pr_info("vita pervasive %s: host mode latched, PHY %s after %d ms (F30=%#x)\n",
 		clk_hw_get_name(hw),
-		(readl(gate->phy_reg) & 0x4) ? "ready" : "NOT ready",
+		(readl(gate->phy_reg) & gate->phy_bit) ? "ready" : "NOT ready",
 		i * 20, readl(gate->phy_reg));
+
+	/*
+	 * VBUS (bus 1 only, the Type-A port): Sony's host-start tail does
+	 * ksceGpioPortSet(1, 3) after the core comes up.  Lowio disasm
+	 * (ksceGpioPortSet @ 0x81002150): port 1 = SceGpio1Reg block at
+	 * 0xE0100000, SET register +0x08, write (1 << pin).  Pin mode is
+	 * configured once by usbserv module init (ksceGpioSetPortMode(1,3,0)
+	 * @ 0x81001120) and is not re-touched here, matching Sony's sequence.
+	 * The PSTV is a GPIO1-poor environment: this driver is the only user
+	 * of the block on the PSTV bench, so the direct write is safe for the
+	 * proof cycle; the eventual proper home is a gpio1@e0100000 DT node
+	 * with a gpio-hog, consumed by the ehci1 node.
+	 */
+	if (gate->vbus_reg) {
+		writel(BIT(3), gate->vbus_reg + 0x08);
+		pr_info("vita pervasive %s: VBUS driven (GPIO1 pin3 SET, E0100008 <= 0x8)\n",
+			clk_hw_get_name(hw));
+	}
 
 	return 0;
 }
@@ -197,6 +240,17 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 	if (!priv->reset_base)
 		return -ENOMEM;
 
+	/*
+	 * GPIO1 (SceGpio1Reg @ 0xE0100000, from lowio ksceGpioPortSet
+	 * disasm): only the USB1 gate gets it, for the VBUS drive above.
+	 * Mapped without claiming -- no DT node exists for the block yet.
+	 */
+	priv->gates[VITA_PCLK_USB1].vbus_reg = devm_ioremap(dev, 0xE0100000, 0x1000);
+	if (IS_ERR(priv->gates[VITA_PCLK_USB1].vbus_reg))
+		return PTR_ERR(priv->gates[VITA_PCLK_USB1].vbus_reg);
+	if (!priv->gates[VITA_PCLK_USB1].vbus_reg)
+		return -ENOMEM;
+
 	priv->onecell = devm_kzalloc(dev,
 				     struct_size(priv->onecell, hws, VITA_PCLK_NR),
 				     GFP_KERNEL);
@@ -218,10 +272,11 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 		priv->gates[i].reg = priv->gate_base + def->idx * 4;
 		priv->gates[i].mask = def->mask;
 		priv->gates[i].lock = &priv->lock;
-		if (def->hostmode) {
+		if (def->hostmode && (buses_mask & (1 << i))) {
 			priv->gates[i].reset_reg = priv->reset_base + 0x090 + i * 4;
 			priv->gates[i].flag_reg = priv->flags_base + 0x084 + i * 4;
 			priv->gates[i].phy_reg = priv->phy_base + 0xF30;
+			priv->gates[i].phy_bit = 1 << i;
 		}
 		priv->gates[i].hw.init = &init;
 

@@ -413,12 +413,25 @@ ENTRY(secondary_startup)
 	 * as it has already been validated by the primary processor.
 	 */
 
- ARM_BE8(setend	be)				@ ensure we are in BE8 mode
+ ARM_BE8(setend	be)					@ ensure we are in BE8 mode
 
 #ifdef CONFIG_ARM_VIRT_EXT
 	bl	__hyp_stub_install_secondary
 #endif
+	@ SMP DIAGNOSTIC (vita): physical SRAM markers, MMU still off here.
+	@ E = entered secondary_startup; low nibble = raw cpu id.
+	mrc	p15, 0, r0, c0, c0, 5
+	and	r0, r0, #0xf
+	orr	r0, r0, #0x45000000			@ 'E'
+	ldr	r1, =0x1F007F90
+	str	r0, [r1]
 	safe_svcmode_maskall r9
+	@ SMP DIAGNOSTIC (vita): M = mode forced to SVC, still pre-MMU.
+	mrc	p15, 0, r0, c0, c0, 5
+	and	r0, r0, #0xf
+	orr	r0, r0, #0x4D000000			@ 'M'
+	ldr	r1, =0x1F007F94
+	str	r0, [r1]
 
 	mrc	p15, 0, r9, c0, c0		@ get processor id
 	bl	__lookup_processor_type

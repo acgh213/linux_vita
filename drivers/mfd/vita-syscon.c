@@ -328,8 +328,126 @@ static ssize_t wlan_power_store(struct device *dev,
 
 static DEVICE_ATTR_RW(wlan_power);
 
+/* Forward decls -- both are defined later in this file */
+static int vita_syscon_short_command_write(struct vita_syscon *syscon,
+					   u16 cmd, u32 data, int cmd_len);
+static int vita_syscon_command_read(struct vita_syscon *syscon, u16 cmd,
+				    void *rx, int rx_size);
+
+/*
+ * syscon_cmd - raw Ernie syscon command write (debug/test hook)
+ *
+ * Usage: echo "<cmd> <data> <cmd_len>" > syscon_cmd   (all values hex)
+ *   e.g. echo "8C5 1 2" > syscon_cmd   -- PSTV (Dolce) USB power on,
+ *   equivalent to ksceSysconCtrlDolceUsbPower(1).
+ */
+static ssize_t syscon_cmd_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	unsigned long cmd, data, len;
+	int ret;
+
+	ret = sscanf(buf, "%lx %lx %lx", &cmd, &data, &len);
+	if (ret != 3)
+		return -EINVAL;
+	if (len < 1 || len > 4)
+		return -EINVAL;
+
+	ret = vita_syscon_short_command_write(syscon, (u16)cmd, (u32)data,
+					      (int)len);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static ssize_t syscon_cmd_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "usage: echo '<cmd> <data> <len>' > syscon_cmd\n");
+}
+
+static DEVICE_ATTR_RW(syscon_cmd);
+
+/*
+ * syscon_read - raw Ernie syscon command READ (debug/test hook)
+ *
+ * Issues a read-form command (TX length 1) and captures the whole response
+ * frame so the payload can be inspected from userspace. The write-only
+ * syscon_cmd hook discards responses, which makes status queries impossible.
+ *
+ * Usage: echo "8C6" > syscon_read ; cat syscon_read
+ *   e.g. 0x8C6 = Dolce USB status, 0x805 = ksceSysconGetUsbDetStatus.
+ */
+static DEFINE_MUTEX(syscon_dbg_lock);
+static u8 syscon_dbg_rx[32];
+static int syscon_dbg_ret = -ENODATA;
+static unsigned int syscon_dbg_cmd;
+
+static ssize_t syscon_read_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	unsigned long cmd;
+
+	if (kstrtoul(buf, 16, &cmd) || cmd > 0xFFFF)
+		return -EINVAL;
+
+	mutex_lock(&syscon_dbg_lock);
+	syscon_dbg_cmd = (unsigned int)cmd;
+	memset(syscon_dbg_rx, 0, sizeof(syscon_dbg_rx));
+	syscon_dbg_ret = vita_syscon_command_read(syscon, (u16)cmd,
+						  syscon_dbg_rx,
+						  sizeof(syscon_dbg_rx));
+	mutex_unlock(&syscon_dbg_lock);
+
+	/* Report transport failures, but keep the captured frame readable */
+	return count;
+}
+
+static ssize_t syscon_read_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	int len, payload, i;
+	u8 declared;
+
+	mutex_lock(&syscon_dbg_lock);
+
+	if (syscon_dbg_ret == -ENODATA) {
+		mutex_unlock(&syscon_dbg_lock);
+		return sysfs_emit(buf, "usage: echo '<cmd_hex>' > syscon_read\n");
+	}
+
+	declared = syscon_dbg_rx[SYSCON_RX_LENGTH];
+	payload = (declared >= 2) ? declared - 2 : 0;
+	if (payload > (int)sizeof(syscon_dbg_rx) - SYSCON_RX_DATA)
+		payload = sizeof(syscon_dbg_rx) - SYSCON_RX_DATA;
+
+	len = sysfs_emit(buf, "cmd=0x%04x ret=%d result=0x%02x len=%u payload=",
+			 syscon_dbg_cmd, syscon_dbg_ret,
+			 syscon_dbg_rx[SYSCON_RX_RESULT], payload);
+
+	for (i = 0; i < payload; i++)
+		len += sysfs_emit_at(buf, len, "%02x", syscon_dbg_rx[SYSCON_RX_DATA + i]);
+
+	len += sysfs_emit_at(buf, len, "\nraw=");
+	for (i = 0; i < 16; i++)
+		len += sysfs_emit_at(buf, len, "%02x", syscon_dbg_rx[i]);
+	len += sysfs_emit_at(buf, len, "\n");
+
+	mutex_unlock(&syscon_dbg_lock);
+	return len;
+}
+
+static DEVICE_ATTR_RW(syscon_read);
+
 static struct attribute *vita_syscon_attrs[] = {
 	&dev_attr_wlan_power.attr,
+	&dev_attr_syscon_cmd.attr,
+	&dev_attr_syscon_read.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vita_syscon);
@@ -436,8 +554,14 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 
 		result = ((u8 *)rx)[SYSCON_RX_RESULT];
 		policy = syscon_result_policy(result, attempt);
-		if (policy == SYSCON_RESULT_RETRY)
+		if (policy == SYSCON_RESULT_RETRY) {
+			/* LAB: temporary — visible retry trace for H1 evidence
+			 * (0x82 WLAN power investigation, 2026-08-17) */
+			dev_err_ratelimited(&spi->dev,
+					    "command 0x%04x attempt %u result 0x%02x (retrying)\n",
+					    cmd, attempt, result);
 			continue;
+		}
 
 		ret = policy;
 		if (ret == -EBUSY)
@@ -445,7 +569,9 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 					     "command 0x%04x busy after %u attempts\n",
 					     cmd, attempt);
 		else if (ret == -EREMOTEIO)
-			dev_dbg_ratelimited(&spi->dev,
+			/* LAB: temporarily visible to capture the result byte for
+			 * the WLAN power-on mapping (H1 evidence, 2026-08-17) */
+			dev_err_ratelimited(&spi->dev,
 					    "command 0x%04x result 0x%02x\n",
 					    cmd, result);
 		goto out;
