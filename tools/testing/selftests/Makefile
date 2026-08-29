@@ -112,6 +112,7 @@ TARGETS += tpm2
 TARGETS += tty
 TARGETS += uevent
 TARGETS += user_events
+TARGETS += vita
 TARGETS += vDSO
 TARGETS += mm
 TARGETS += x86
