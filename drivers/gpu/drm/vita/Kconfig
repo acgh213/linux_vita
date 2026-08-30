@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config DRM_VITA_IFTU
+	tristate "DRM support for the PS Vita / PS TV IFTU display controller"
+	depends on DRM && (ARCH_VITA || COMPILE_TEST)
+	select APERTURE_HELPERS
+	select DRM_GEM_SHMEM_HELPER
+	select DRM_KMS_HELPER
+	help
+	  DRM driver for the IFTU display controller found on the PS Vita and
+	  PS TV (Dolce). Takes over the framebuffer already configured and
+	  scanned out by the bare-metal Linux loader (vita-baremetal-linux-loader)
+	  -- fixed inherited mode only in the first milestone, no hardware
+	  modeset, no vblank IRQ yet. See
+	  lab/gpu-re/DISPLAY-DRM-RESEARCH-2026-08-30.md in the vita-linux-research
+	  tree for the full register map, milestone ladder, and hardware
+	  citations this driver is built from.
+
+	  If M is selected the module will be called vita_iftu.
