@@ -110,6 +110,17 @@ struct vita_iftu_device {
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	struct drm_connector connector;
+
+	/* Plane format list. simpledrm's format-conversion emulation (fbdev
+	 * console, etc.) needs more than just the native pixel format --
+	 * drm_fb_build_fourcc_list() expands it to include the legacy
+	 * XRGB8888 target fbdev emulation looks for. Without this, probe
+	 * succeeds but fbdev-shmem setup fails with "No compatible format
+	 * found" because drm_mode_legacy_fb_format(32, 24) can't find
+	 * XRGB8888 in a single-entry ABGR8888-only list.
+	 */
+	uint32_t formats[8];
+	size_t nformats;
 };
 
 static struct vita_iftu_device *vita_iftu_device_of_dev(struct drm_device *dev)
@@ -438,7 +449,6 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	unsigned long max_width, max_height;
 	void *screen_base;
 	int width, height, stride;
-	uint32_t format_list[1];
 	int ret;
 
 	idev = devm_drm_dev_alloc(&pdev->dev, drv, struct vita_iftu_device, dev);
@@ -548,12 +558,13 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	max_width = idev->mode.hdisplay;
 	max_height = idev->mode.vdisplay;
 
-	format_list[0] = idev->format->format;
+	idev->nformats = drm_fb_build_fourcc_list(dev, &idev->format->format, 1,
+						   idev->formats, ARRAY_SIZE(idev->formats));
 
 	primary_plane = &idev->primary_plane;
 	ret = drm_universal_plane_init(dev, primary_plane, 0,
 					&vita_iftu_primary_plane_funcs,
-					format_list, 1,
+					idev->formats, idev->nformats,
 					vita_iftu_primary_plane_format_modifiers,
 					DRM_PLANE_TYPE_PRIMARY, NULL);
 	if (ret)
@@ -609,7 +620,6 @@ static int vita_iftu_probe(struct platform_device *pdev)
 {
 	struct vita_iftu_device *idev;
 	struct drm_device *dev;
-	unsigned int color_mode;
 	int ret;
 
 	idev = vita_iftu_device_create(&vita_iftu_driver, pdev);
@@ -621,11 +631,51 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	color_mode = drm_format_info_bpp(idev->format, 0);
-	if (color_mode == 16)
-		color_mode = idev->format->depth; /* can be 15 or 16 */
-
-	drm_fbdev_shmem_setup(dev, color_mode);
+	/*
+	 * fbdev-console emulation DELIBERATELY DISABLED (2026-08-30).
+	 *
+	 * drm_fbdev_shmem_setup() drives DRM's client helper through a real
+	 * first atomic commit onto the primary plane -- the actual first
+	 * hardware exercise of vita_iftu_primary_plane_helper_atomic_update()
+	 * / _atomic_disable() on real silicon. The first deploy attempt
+	 * (before the drm_fb_build_fourcc_list() fix below) never reached
+	 * this path: the format lookup failed, fbdev setup bailed out with
+	 * a logged warning, and the DRM device sat inert -- which is why
+	 * that build was hardware-clean (4/4 cores, /dev/dri/card0 present,
+	 * no faults) despite never having painted anything.
+	 *
+	 * Fixing the format-list bug (see idev->formats/nformats above) let
+	 * this path actually run for the first time, and the very next
+	 * deploy attempt produced a black HDMI picture that did not
+	 * recover on its own -- twice. VitaOS's own network stack survived
+	 * both times (port 1338 came back / was still reachable), which
+	 * points at the display atomic-commit path hanging or corrupting
+	 * scanout, not a full kernel panic.
+	 *
+	 * Prime suspect: vita_iftu_primary_plane_helper_atomic_disable()
+	 * unconditionally iosys_map_memset()s the ENTIRE live CDRAM
+	 * scanout buffer to zero. If atomic modeset's initial commit
+	 * disables the plane as a transient step (normal DRM atomic
+	 * sequencing) and the following re-enable/update stalls or fails
+	 * for any reason -- e.g. interaction with crtc_state->no_vblank,
+	 * or a bug in the drm_fb_blit() copy-back -- the screen is left
+	 * black with nothing to ever repaint it. This has NOT been
+	 * hardware-isolated yet; it is the leading theory, not a
+	 * confirmed root cause.
+	 *
+	 * Do not re-enable this call until:
+	 *   1. atomic_disable's memset is made conditional / safe (e.g.
+	 *      skip it, or confirm the plane is never spuriously disabled
+	 *      during the initial commit), and
+	 *   2. atomic_update has been exercised and verified on hardware
+	 *      by some means OTHER than the automatic fbdev-console commit
+	 *      (e.g. a deliberate modetest/dumb-buffer test with the
+	 *      device otherwise idle, so a hang doesn't take out the only
+	 *      video path with nothing left to fall back to).
+	 *
+	 * See lab/gpu-re/DRM-M1-SKELETON-2026-08-30.md for the deploy log
+	 * of both attempts.
+	 */
 
 	return 0;
 }
