@@ -27,6 +27,15 @@
 	};
 };
 
+/* Handheld display uses DSI bus 0.  The remaining entries are common
+ * controller instances already named by the in-tree Vita DT.
+ */
+&pervasive_clk {
+	vita,clock-gate-indices = <VITA_PCLK_DSI0 VITA_PCLK_GPIO
+				    VITA_PCLK_SPI0 VITA_PCLK_UART0
+				    VITA_PCLK_MSIF>;
+};
+
 &i2c0 {
 	status = "okay";
 };

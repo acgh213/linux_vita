@@ -41,6 +41,9 @@
  */
 &pervasive_clk {
 	vita,usb-hostmode-mask = <0x5>;
+	vita,clock-gate-indices = <VITA_PCLK_DSI1 VITA_PCLK_GPIO
+				    VITA_PCLK_SPI0 VITA_PCLK_UART0
+				    VITA_PCLK_MSIF>;
 };
 
 /* I2C1 has ADV7533 HDMI transmitter (0x38, 0x3D-0x3F) — disabled until

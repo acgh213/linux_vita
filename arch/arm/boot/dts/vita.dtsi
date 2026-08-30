@@ -309,6 +309,9 @@
 			/* Optional vita,usb-hostmode-mask selects buses for the
 			 * Sony host-mode park-window sequence.  Its safe default is
 			 * bus 2 only; boards must opt in explicitly.
+			 * Optional vita,clock-gate-indices lists non-USB clock IDs
+			 * physically available on that board.  With no list, only
+			 * the ABI-stable USB gates are registered.
 			 */
 			/* Reg 0: pervasive flags page (+0x084..0x8C USB mode
 			 * flags).  Reg 1: clk gate page (+0x090..0x98 USB
