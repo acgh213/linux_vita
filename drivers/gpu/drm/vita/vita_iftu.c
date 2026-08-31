@@ -47,6 +47,7 @@
  * once the config-select atomicity question is answered on hardware.
  */
 
+#include <linux/atomic.h>
 #include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
@@ -76,6 +77,8 @@
 #define DRIVER_DATE	"20260830"
 #define DRIVER_MAJOR	1
 #define DRIVER_MINOR	0
+
+#define VITA_IFTU_TRACE_LIMIT	64
 
 /* IFTU control-block offsets, relative to the "control" reg resource.
  * Verified live on PSTV bus 1 (0xE5032000): CONTROL=0x1 (enabled),
@@ -121,11 +124,26 @@ struct vita_iftu_device {
 	 */
 	uint32_t formats[8];
 	size_t nformats;
+
+	/* Bounded callback trace for the supervised first-commit test. */
+	atomic_t trace_count;
 };
 
 static struct vita_iftu_device *vita_iftu_device_of_dev(struct drm_device *dev)
 {
 	return container_of(dev, struct vita_iftu_device, dev);
+}
+
+static bool vita_iftu_trace_take(struct vita_iftu_device *idev,
+				 unsigned int *seq)
+{
+	int count = atomic_inc_return(&idev->trace_count);
+
+	if (count > VITA_IFTU_TRACE_LIMIT)
+		return false;
+
+	*seq = count;
+	return true;
 }
 
 /*
@@ -194,6 +212,9 @@ static int vita_iftu_primary_plane_helper_atomic_check(struct drm_plane *plane,
 	struct drm_crtc_state *new_crtc_state = NULL;
 	struct drm_device *dev = plane->dev;
 	struct vita_iftu_device *idev = vita_iftu_device_of_dev(dev);
+	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state,
+											  plane);
+	unsigned int trace_seq;
 	int ret;
 
 	if (new_crtc)
@@ -207,6 +228,18 @@ static int vita_iftu_primary_plane_helper_atomic_check(struct drm_plane *plane,
 		return ret;
 	else if (!new_plane_state->visible)
 		return 0;
+
+	if (vita_iftu_trace_take(idev, &trace_seq))
+		drm_dbg(dev, "vita-iftu trace[%u] check old(crtc=%d fb=%d) "
+			 "new(crtc=%d fb=%d visible=%d) src=%d,%d-%d,%d "
+			 "dst=%d,%d-%d,%d\n", trace_seq,
+			 !!old_plane_state->crtc, !!old_plane_state->fb,
+			 !!new_plane_state->crtc, !!new_plane_state->fb,
+			 new_plane_state->visible,
+			 new_plane_state->src.x1, new_plane_state->src.y1,
+			 new_plane_state->src.x2, new_plane_state->src.y2,
+			 new_plane_state->dst.x1, new_plane_state->dst.y1,
+			 new_plane_state->dst.x2, new_plane_state->dst.y2);
 
 	if (new_fb->format != idev->format) {
 		void *buf;
@@ -231,9 +264,23 @@ static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane
 	struct vita_iftu_device *idev = vita_iftu_device_of_dev(dev);
 	struct drm_atomic_helper_damage_iter iter;
 	struct drm_rect damage;
+	unsigned int trace_seq;
 	int ret, idx;
 
+	if (vita_iftu_trace_take(idev, &trace_seq))
+		drm_dbg(dev, "vita-iftu trace[%u] update old_fb=%d new_fb=%d "
+			 "visible=%d src=%d,%d-%d,%d dst=%d,%d-%d,%d\n",
+			 trace_seq, !!old_plane_state->fb, !!fb,
+			 plane_state->visible,
+			 plane_state->src.x1, plane_state->src.y1,
+			 plane_state->src.x2, plane_state->src.y2,
+			 plane_state->dst.x1, plane_state->dst.y1,
+			 plane_state->dst.x2, plane_state->dst.y2);
+
 	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
+	if (vita_iftu_trace_take(idev, &trace_seq))
+		drm_dbg(dev, "vita-iftu trace[%u] begin_fb_access ret=%d\n",
+			 trace_seq, ret);
 	if (ret)
 		return;
 
@@ -256,13 +303,19 @@ static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane
 			continue;
 
 		iosys_map_incr(&dst, drm_fb_clip_offset(idev->pitch, idev->format, &dst_clip));
-		drm_fb_blit(&dst, &idev->pitch, idev->format->format, shadow_plane_state->data,
-			    fb, &damage, &shadow_plane_state->fmtcnv_state);
+		ret = drm_fb_blit(&dst, &idev->pitch, idev->format->format,
+				  shadow_plane_state->data, fb, &damage,
+				  &shadow_plane_state->fmtcnv_state);
+		if (vita_iftu_trace_take(idev, &trace_seq))
+			drm_dbg(dev, "vita-iftu trace[%u] damage=%d,%d-%d,%d blit_ret=%d\n",
+				 trace_seq, damage.x1, damage.y1, damage.x2, damage.y2, ret);
 	}
 
 	drm_dev_exit(idx);
 out_end_cpu_access:
 	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+	if (vita_iftu_trace_take(idev, &trace_seq))
+		drm_dbg(dev, "vita-iftu trace[%u] end_fb_access\n", trace_seq);
 }
 
 static void vita_iftu_primary_plane_helper_atomic_disable(struct drm_plane *plane,
@@ -270,12 +323,27 @@ static void vita_iftu_primary_plane_helper_atomic_disable(struct drm_plane *plan
 {
 	struct drm_device *dev = plane->dev;
 	struct vita_iftu_device *idev = vita_iftu_device_of_dev(dev);
+	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state,
+											  plane);
+	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
+											  plane);
+	unsigned int trace_seq;
 	int idx;
 
 	if (!drm_dev_enter(dev, &idx))
 		return;
 
-	iosys_map_memset(&idev->screen_base, 0, 0, idev->pitch * idev->mode.vdisplay);
+	/*
+	 * Do not clear the inherited CDRAM scanout here. It is live display
+	 * memory, not a disposable shadow buffer; clearing it makes any disable
+	 * destructive and can strand the display black if the following update
+	 * fails. B2 observes this callback without modifying scanout contents.
+	 */
+	if (vita_iftu_trace_take(idev, &trace_seq))
+		drm_dbg(dev, "vita-iftu trace[%u] disable old(crtc=%d fb=%d) "
+			 "new(crtc=%d fb=%d) -- scanout clear suppressed\n", trace_seq,
+			!!old_plane_state->crtc, !!old_plane_state->fb,
+			!!new_plane_state->crtc, !!new_plane_state->fb);
 
 	drm_dev_exit(idx);
 }
@@ -331,6 +399,8 @@ static int vita_iftu_crtc_helper_atomic_check(struct drm_crtc *crtc,
 					       struct drm_atomic_state *state)
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
+	unsigned int trace_seq;
 	int ret;
 
 	ret = drm_crtc_helper_atomic_check(crtc, state);
@@ -338,6 +408,9 @@ static int vita_iftu_crtc_helper_atomic_check(struct drm_crtc *crtc,
 		return ret;
 
 	crtc_state->no_vblank = true;
+	if (vita_iftu_trace_take(idev, &trace_seq))
+		drm_dbg(crtc->dev, "vita-iftu trace[%u] crtc_check no_vblank=%d\n",
+			 trace_seq, crtc_state->no_vblank);
 	return 0;
 }
 
@@ -626,6 +699,7 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	if (IS_ERR(idev))
 		return PTR_ERR(idev);
 	dev = &idev->dev;
+	atomic_set(&idev->trace_count, 0);
 
 	ret = drm_dev_register(dev, 0);
 	if (ret)
