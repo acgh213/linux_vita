@@ -515,6 +515,7 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	struct vita_iftu_device *idev;
 	struct drm_device *dev;
 	struct resource *mem;
+	struct resource fb_mem;
 	struct drm_plane *primary_plane;
 	struct drm_crtc *crtc;
 	struct drm_encoder *encoder;
@@ -579,20 +580,27 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	 * same handling as simpledrm's "mem" branch (devm_memremap with
 	 * MEMREMAP_WC), not the MMIO-resource branch.
 	 */
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!mem) {
+	{
 		struct device_node *mem_node = of_parse_phandle(of_node, "memory-region", 0);
-		static struct resource res;
 
 		if (!mem_node) {
 			drm_err(dev, "vita-iftu: no memory-region\n");
 			return ERR_PTR(-EINVAL);
 		}
-		ret = of_address_to_resource(mem_node, 0, &res);
+		ret = of_address_to_resource(mem_node, 0, &fb_mem);
 		of_node_put(mem_node);
 		if (ret)
 			return ERR_PTR(ret);
-		mem = &res;
+		mem = &fb_mem;
+	}
+	if (mem->start != 0x20000000 || resource_size(mem) != 0x08000000) {
+		drm_err(dev, "vita-iftu: unexpected framebuffer resource %pr\n", mem);
+		return ERR_PTR(-EINVAL);
+	}
+	if ((u64)idev->pitch * height > resource_size(mem)) {
+		drm_err(dev, "vita-iftu: framebuffer %ux%u exceeds resource %pr\n",
+			width, height, mem);
+		return ERR_PTR(-EINVAL);
 	}
 
 	ret = devm_aperture_acquire_from_firmware(dev, mem->start, resource_size(mem));
