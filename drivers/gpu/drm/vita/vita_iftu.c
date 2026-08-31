@@ -665,6 +665,8 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	if (ret)
 		return ERR_PTR(ret);
 	drm_connector_helper_add(connector, &vita_iftu_connector_helper_funcs);
+	/* The loader owns HDMI detection and the inherited mode is fixed. */
+	connector->status = connector_status_connected;
 	drm_connector_set_panel_orientation(connector, DRM_MODE_PANEL_ORIENTATION_NORMAL);
 
 	ret = drm_connector_attach_encoder(connector, encoder);
