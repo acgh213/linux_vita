@@ -321,7 +321,11 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 
 		init.name = def->name;
 		init.ops = &vita_pervasive_clk_ops;
-		init.flags = 0;
+		/*
+		 * Non-USB gates are registration-only until consumers exist.
+		 * Preserve firmware-owned state during clk_disable_unused().
+		 */
+		init.flags = i > VITA_PCLK_USB2 ? CLK_IGNORE_UNUSED : 0;
 		init.num_parents = 0;
 
 		priv->gates[i].reg = priv->gate_base + def->idx * 4;
