@@ -13,6 +13,7 @@
 #include <linux/mmc/sdio_func.h>
 #include <linux/module.h>
 #include <linux/devcoredump.h>
+#include <linux/of.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -1513,6 +1514,14 @@ static int btmrvl_sdio_probe(struct sdio_func *func,
 	int ret = 0;
 	struct btmrvl_private *priv = NULL;
 	struct btmrvl_sdio_card *card = NULL;
+
+	/*
+	 * Embedded SDIO devices can describe unusable functions in DT.  Do not
+	 * register or touch firmware for a function the board has disabled.
+	 */
+	if (func->dev.of_node && !of_device_is_available(func->dev.of_node))
+		return dev_err_probe(&func->dev, -ENODEV,
+				     "SDIO function disabled by firmware description\n");
 
 	BT_INFO("vendor=0x%x, device=0x%x, class=%d, fn=%d",
 			id->vendor, id->device, id->class, func->num);

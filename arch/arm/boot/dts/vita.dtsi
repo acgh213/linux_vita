@@ -176,10 +176,18 @@
 		sdif2: mmc@e0c10000 {
 			compatible = "vita,sdhci";
 			reg = <0xe0c10000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
 			vita,bus-index = <2>;
 			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>;
 			mmc-pwrseq = <&wlan_pwrseq>;
 			status = "disabled";
+
+			/* The Vita does not use the SD8787 Bluetooth AMP function. */
+			bluetooth-amp@3 {
+				reg = <3>;
+				status = "disabled";
+			};
 		};
 
 		sdif3: mmc@e0c20000 {
