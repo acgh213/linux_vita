@@ -9,6 +9,17 @@
 #define VITA_PCLK_USB1		1
 #define VITA_PCLK_USB2		2
 
-#define VITA_PCLK_NR		3
+/*
+ * These ids are append-only.  Keep the USB ids above stable: they are used
+ * by the existing Vita DTBs and their host-mode clock semantics.
+ */
+#define VITA_PCLK_DSI0		3
+#define VITA_PCLK_DSI1		4
+#define VITA_PCLK_GPIO		5
+#define VITA_PCLK_SPI0		6
+#define VITA_PCLK_UART0		7
+#define VITA_PCLK_MSIF		8
+
+#define VITA_PCLK_NR		9
 
 #endif

@@ -42,6 +42,19 @@
  * clock provider's Device Tree node, keeping the selection reviewable and
  * independent of a mutable kernel command-line experiment.  The all-bus 0x7
  * case remains unvalidated and is rejected.
+ *
+ * The non-USB indices below are intentionally registration-only.  No DT
+ * consumer is added here, and no newly exposed clock is enabled by default.
+ * The static register resolution identifies DSI0/1, GPIO, SPI0, UART0 and
+ * MSIF, but does not establish instance counts for the indexed SPI/UART/audio
+ * families.  Only the instances already named by the in-tree Vita DT/driver
+ * set are exposed; audio remains deferred until its masks and semantic names
+ * are recovered.
+ *
+ * Boards explicitly list available non-USB indices in
+ * vita,clock-gate-indices.  This prevents a future consumer from enabling the
+ * handheld DSI0 gate on PSTV, where bus 0 is known to be inaccessible.  USB
+ * IDs remain registered unconditionally to preserve the existing DT ABI.
  */
 
 #include <linux/bits.h>
@@ -70,7 +83,19 @@ static const struct vita_pervasive_gate_def vita_pervasive_gates[VITA_PCLK_NR] =
 	[VITA_PCLK_USB0] = { "usb0", 0x090 / 4, 0xf, true },
 	[VITA_PCLK_USB1] = { "usb1", 0x094 / 4, 0xf, true },
 	[VITA_PCLK_USB2] = { "usb2", 0x098 / 4, 0xf, true },
+	[VITA_PCLK_DSI0] = { "dsi0", 0x080 / 4, 0xf, false },
+	[VITA_PCLK_DSI1] = { "dsi1", 0x084 / 4, 0xf, false },
+	[VITA_PCLK_GPIO] = { "gpio", 0x100 / 4, 1, false },
+	[VITA_PCLK_SPI0] = { "spi0", 0x104 / 4, 1, false },
+	[VITA_PCLK_UART0] = { "uart0", 0x120 / 4, 1, false },
+	[VITA_PCLK_MSIF] = { "msif", 0x0b0 / 4, 1, false },
 };
+
+/* Preserve the existing USB DT ABI while making omissions fail at build time. */
+static_assert(VITA_PCLK_USB0 == 0);
+static_assert(VITA_PCLK_USB1 == 1);
+static_assert(VITA_PCLK_USB2 == 2);
+static_assert(VITA_PCLK_NR <= 32);
 
 struct vita_pervasive_clk {
 	struct clk_hw hw;
@@ -203,12 +228,57 @@ static int vita_pervasive_parse_hostmode_mask(struct device *dev, u32 *mask)
 	return 0;
 }
 
+static int vita_pervasive_parse_gate_mask(struct device *dev, u32 *mask)
+{
+	int count, i, ret;
+	u32 id;
+
+	/* Existing USB indices are always available for ABI compatibility. */
+	*mask = GENMASK(VITA_PCLK_USB2, VITA_PCLK_USB0);
+	if (!of_property_present(dev->of_node, "vita,clock-gate-indices"))
+		return 0;
+
+	count = of_property_count_u32_elems(dev->of_node,
+					    "vita,clock-gate-indices");
+	if (count < 0)
+		return dev_err_probe(dev, count,
+				     "failed to count clock-gate indices\n");
+	if (!count)
+		return dev_err_probe(dev, -EINVAL,
+				     "clock-gate indices list is empty\n");
+	if (count > VITA_PCLK_NR - VITA_PCLK_USB2 - 1)
+		return dev_err_probe(dev, -EINVAL,
+				     "too many non-USB clock-gate indices: %d\n",
+				     count);
+
+	for (i = 0; i < count; i++) {
+		ret = of_property_read_u32_index(dev->of_node,
+						 "vita,clock-gate-indices", i,
+						 &id);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to read clock-gate index %d\n", i);
+		if (id <= VITA_PCLK_USB2 || id >= VITA_PCLK_NR)
+			return dev_err_probe(dev, -EINVAL,
+					     "invalid non-USB clock-gate index %u\n",
+					     id);
+		if (*mask & BIT(id))
+			return dev_err_probe(dev, -EINVAL,
+					     "duplicate non-USB clock-gate index %u\n",
+					     id);
+		*mask |= BIT(id);
+	}
+
+	return 0;
+}
+
 static int vita_pervasive_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct vita_pervasive *priv;
 	struct resource *res;
 	u32 hostmode_mask;
+	u32 gate_mask;
 	unsigned int i;
 	int ret;
 
@@ -217,6 +287,9 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	ret = vita_pervasive_parse_hostmode_mask(dev, &hostmode_mask);
+	if (ret)
+		return ret;
+	ret = vita_pervasive_parse_gate_mask(dev, &gate_mask);
 	if (ret)
 		return ret;
 
@@ -253,9 +326,18 @@ static int vita_pervasive_probe(struct platform_device *pdev)
 		const struct vita_pervasive_gate_def *def = &vita_pervasive_gates[i];
 		struct clk_init_data init = {};
 
+		if (!(gate_mask & BIT(i))) {
+			priv->onecell->hws[i] = ERR_PTR(-ENOENT);
+			continue;
+		}
+
 		init.name = def->name;
 		init.ops = &vita_pervasive_clk_ops;
-		init.flags = 0;
+		/*
+		 * Non-USB gates are registration-only until consumers exist.
+		 * Preserve firmware-owned state during clk_disable_unused().
+		 */
+		init.flags = i > VITA_PCLK_USB2 ? CLK_IGNORE_UNUSED : 0;
 		init.num_parents = 0;
 
 		priv->gates[i].reg = priv->gate_base + def->idx * 4;
