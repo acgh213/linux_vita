@@ -235,13 +235,21 @@ static int vita_pervasive_parse_gate_mask(struct device *dev, u32 *mask)
 
 	/* Existing USB indices are always available for ABI compatibility. */
 	*mask = GENMASK(VITA_PCLK_USB2, VITA_PCLK_USB0);
+	if (!of_property_present(dev->of_node, "vita,clock-gate-indices"))
+		return 0;
+
 	count = of_property_count_u32_elems(dev->of_node,
 					    "vita,clock-gate-indices");
-	if (count == -EINVAL)
-		return 0;
 	if (count < 0)
 		return dev_err_probe(dev, count,
 				     "failed to count clock-gate indices\n");
+	if (!count)
+		return dev_err_probe(dev, -EINVAL,
+				     "clock-gate indices list is empty\n");
+	if (count > VITA_PCLK_NR - VITA_PCLK_USB2 - 1)
+		return dev_err_probe(dev, -EINVAL,
+				     "too many non-USB clock-gate indices: %d\n",
+				     count);
 
 	for (i = 0; i < count; i++) {
 		ret = of_property_read_u32_index(dev->of_node,
@@ -253,6 +261,10 @@ static int vita_pervasive_parse_gate_mask(struct device *dev, u32 *mask)
 		if (id <= VITA_PCLK_USB2 || id >= VITA_PCLK_NR)
 			return dev_err_probe(dev, -EINVAL,
 					     "invalid non-USB clock-gate index %u\n",
+					     id);
+		if (*mask & BIT(id))
+			return dev_err_probe(dev, -EINVAL,
+					     "duplicate non-USB clock-gate index %u\n",
 					     id);
 		*mask |= BIT(id);
 	}
