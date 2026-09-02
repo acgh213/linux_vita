@@ -48,6 +48,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
@@ -71,6 +72,7 @@
 #include <drm/drm_panic.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_vblank.h>
 
 #define DRIVER_NAME	"vita-iftu"
 #define DRIVER_DESC	"DRM driver for the PS Vita/PS TV IFTU display controller"
@@ -91,14 +93,30 @@
 #define IFTU_CREG_CONTROL2		0x04
 #define IFTU_CREG_PLANE_SEL(plane)	(0x10 + (plane) * 0x08)
 
+/* DSI bus-1 interrupt block (relative to the "dsi" reg resource at
+ * 0xE5060000). Hardware-verified 2026-08-30: status/ack +0x50 = 0xE
+ * (write-to-clear), pending +0x48 = 0x1, enable +0x54 = 0x2 (vblank,
+ * armed by the loader). See lab/gpu-re/IFTU-VBLANK-FINDING-2026-08-30.md.
+ */
+#define IFTU_DSI_INTR_PENDING		0x48
+#define IFTU_DSI_INTR_STATUS		0x50
+#define IFTU_DSI_INTR_ENABLE		0x54
+#define IFTU_DSI_INTR_VBLANK		BIT(1)
+
 struct vita_iftu_device {
 	struct drm_device dev;
 
 	/* IFTU register windows. control_regs is unused (read-only sanity
-	 * check only) until the M2 plane-flip patch.
+	 * check only) until the M2 plane-flip patch. dsi_regs is the DSI
+	 * bus-1 interrupt block, claimed for the M2 vblank IRQ.
 	 */
 	void __iomem *plane_regs;
 	void __iomem *control_regs;
+	void __iomem *dsi_regs;
+	int irq;
+
+	/* Vblank IRQ count, bumped in the ISR and reported via debugfs. */
+	atomic64_t vblank_count;
 
 	/* Inherited mode + framebuffer, exactly like simpledrm's
 	 * system-memory path: fixed at probe time from devicetree, never
@@ -419,6 +437,38 @@ static const struct drm_crtc_helper_funcs vita_iftu_crtc_helper_funcs = {
 	.atomic_check = vita_iftu_crtc_helper_atomic_check,
 };
 
+/*
+ * M2 Gate A vblank IRQ. The loader already arms the DSI-side vblank mask
+ * (intr enable +0x54 = 2); Linux claims the GIC line (SPI 178, hardware
+ * IRQ 210) and acks via the write-to-clear status register +0x50.
+ */
+static irqreturn_t vita_iftu_irq_handler(int irq, void *data)
+{
+	struct vita_iftu_device *idev = data;
+	u32 status;
+
+	status = readl(idev->dsi_regs + IFTU_DSI_INTR_STATUS);
+	if (status & IFTU_DSI_INTR_VBLANK) {
+		/* Write-to-clear ack, then signal the core. */
+		writel(status, idev->dsi_regs + IFTU_DSI_INTR_STATUS);
+		atomic64_inc(&idev->vblank_count);
+		drm_crtc_handle_vblank(&idev->crtc);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static int vita_iftu_enable_vblank(struct drm_crtc *crtc)
+{
+	/* The loader keeps the DSI vblank mask armed; nothing to enable. */
+	return 0;
+}
+
+static void vita_iftu_disable_vblank(struct drm_crtc *crtc)
+{
+	/* Keep the line armed; the loader owns the mask. */
+}
+
 static const struct drm_crtc_funcs vita_iftu_crtc_funcs = {
 	.reset = drm_atomic_helper_crtc_reset,
 	.destroy = drm_crtc_cleanup,
@@ -426,6 +476,8 @@ static const struct drm_crtc_funcs vita_iftu_crtc_funcs = {
 	.page_flip = drm_atomic_helper_page_flip,
 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+	.enable_vblank = vita_iftu_enable_vblank,
+	.disable_vblank = vita_iftu_disable_vblank,
 };
 
 static const struct drm_encoder_funcs vita_iftu_encoder_funcs = {
@@ -573,6 +625,16 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	}
 	vita_iftu_log_control_regs(dev, idev);
 
+	/* DSI bus-1 interrupt block (M2 Gate A). The loader already armed
+	 * the vblank mask; we map the window so the ISR can ack +0x50.
+	 */
+	idev->dsi_regs = devm_platform_ioremap_resource_byname(pdev, "dsi");
+	if (IS_ERR(idev->dsi_regs)) {
+		drm_err(dev, "vita-iftu: failed to map \"dsi\" reg: %ld\n",
+			PTR_ERR(idev->dsi_regs));
+		return ERR_CAST(idev->dsi_regs);
+	}
+
 	/*
 	 * Framebuffer memory: the "memory-region" points at the
 	 * reserved-memory CDRAM node (see pstv.dts). This is normal
@@ -660,6 +722,12 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 		return ERR_PTR(ret);
 	drm_crtc_helper_add(crtc, &vita_iftu_crtc_helper_funcs);
 
+	/* M2 Gate A: one vblank-capable CRTC. */
+	ret = drm_vblank_init(dev, 1);
+	if (ret)
+		return ERR_PTR(ret);
+	atomic64_set(&idev->vblank_count, 0);
+
 	encoder = &idev->encoder;
 	ret = drm_encoder_init(dev, encoder, &vita_iftu_encoder_funcs,
 				DRM_MODE_ENCODER_NONE, NULL);
@@ -714,6 +782,32 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	ret = drm_dev_register(dev, 0);
 	if (ret)
 		return ret;
+
+	/*
+	 * M2 Gate A vblank IRQ. The loader armed the DSI-side mask; the
+	 * GIC line (SPI 178 = hardware IRQ 210) is disabled until claimed
+	 * here. request_irq before drm_dev_register would leave a window
+	 * where the ISR could call drm_crtc_handle_vblank() on an
+	 * unregistered device, so the request happens after registration.
+	 * The crtc is initialized in device_create, so handle_vblank is
+	 * safe from this point on. Failure is fatal: an unclaimed but
+	 * enabled line can produce spurious IRQs, and M2 vblank needs the
+	 * line claimed anyway.
+	 */
+	idev->irq = platform_get_irq(pdev, 0);
+	if (idev->irq < 0) {
+		drm_err(dev, "vita-iftu: no vblank interrupt in devicetree: %d\n",
+			idev->irq);
+		return idev->irq;
+	}
+	ret = devm_request_irq(&pdev->dev, idev->irq, vita_iftu_irq_handler,
+			       IRQF_TRIGGER_HIGH, DRIVER_NAME, idev);
+	if (ret) {
+		drm_err(dev, "vita-iftu: request_irq(%d) failed: %d\n",
+			idev->irq, ret);
+		return ret;
+	}
+	drm_info(dev, "vita-iftu: vblank IRQ %d claimed\n", idev->irq);
 
 	/*
 	 * fbdev-console emulation DELIBERATELY DISABLED (2026-08-30).
