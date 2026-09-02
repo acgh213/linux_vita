@@ -103,6 +103,33 @@
 #define IFTU_DSI_INTR_ENABLE		0x54
 #define IFTU_DSI_INTR_VBLANK		BIT(1)
 
+/* Plane-config blocks, relative to the "planes" reg resource.
+ * Two configs per plane at +0x200 + cfg*0x100; the control block's
+ * PLANE_SEL selects which is scanned out. Hardware-verified live on
+ * PSTV bus 1: config 0 @ 0xE5030200 (FB_PADDR=0x20000000,
+ * SRC_PIXELFMT=0x10, SRC_FB_W=0x500, SRC_FB_H=0x2D0, DST_W/H same,
+ * scale 0x10000) and config 1 @ 0xE5030300 (initially mirrors config 0).
+ */
+#define IFTU_PLANE_A_CFG(plane)		(0x200 + (plane) * 0x100)
+#define IFTU_PCFG_FB_PADDR		0x00
+#define IFTU_PCFG_SRC_PIXELFMT		0x40
+#define IFTU_PCFG_SRC_FB_W		0x44
+#define IFTU_PCFG_SRC_FB_H		0x48
+#define IFTU_PCFG_DST_W			0xA4
+#define IFTU_PCFG_DST_H			0xA8
+#define IFTU_PCFG_SRC_W			0xC0
+#define IFTU_PCFG_SRC_H			0xC4
+#define IFTU_PCFG_DST_X			0xC8
+#define IFTU_PCFG_DST_Y			0xCC
+#define IFTU_PIXFMT_A8B8G8R8		0x10
+#define IFTU_SCALE_1X			0x10000
+
+/* Second page-flip buffer: immediately after the inherited framebuffer
+ * (1280x720x4 = 0x384000 bytes), page-aligned, inside CDRAM. ~0.1% of
+ * the 128 MiB region. See DRM-M2-DESIGN-2026-09-01.md.
+ */
+#define VITA_IFTU_SECOND_FB_OFFSET	0x384000
+
 struct vita_iftu_device {
 	struct drm_device dev;
 
@@ -560,6 +587,33 @@ static void vita_iftu_log_control_regs(struct drm_device *dev,
 			      "the loader's mode may not actually be live\n");
 }
 
+/*
+ * M2 Gate B: program plane A config 1 (the inactive config) to a second
+ * CDRAM buffer, leaving the selected config 0 untouched. The loader
+ * initialized both configs identically; we copy the live config 0 block
+ * to config 1 so it inherits the exact geometry, then repoint FB_PADDR.
+ * No selector write happens here -- PLANE_A_SEL stays on config 0, so the
+ * active scanout must not change. Gate B verifies that on hardware.
+ */
+static void vita_iftu_program_second_config(struct drm_device *dev,
+					    struct vita_iftu_device *idev,
+					    u32 second_fb_paddr)
+{
+	u32 src = IFTU_PLANE_A_CFG(0);
+	u32 dst = IFTU_PLANE_A_CFG(1);
+	u32 off;
+
+	for (off = 0; off < 0x100; off += 4)
+		writel(readl(idev->plane_regs + src + off),
+		       idev->plane_regs + dst + off);
+
+	writel(second_fb_paddr, idev->plane_regs + dst + IFTU_PCFG_FB_PADDR);
+
+	drm_info(dev,
+		 "vita-iftu: plane A config 1 -> second buffer 0x%08x, config 0 active\n",
+		 second_fb_paddr);
+}
+
 static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver *drv,
 							 struct platform_device *pdev)
 {
@@ -664,6 +718,16 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 			width, height, mem);
 		return ERR_PTR(-EINVAL);
 	}
+
+	/*
+	 * M2 Gate B: the second page-flip buffer lives immediately after
+	 * the inherited framebuffer, inside the same CDRAM memory-region.
+	 * Program plane A config 1 (inactive) to point at it now so the
+	 * later page-flip gate only has to toggle the selector. Config 0
+	 * stays selected; the active scanout must remain untouched.
+	 */
+	vita_iftu_program_second_config(dev, idev,
+					mem->start + VITA_IFTU_SECOND_FB_OFFSET);
 
 	ret = devm_aperture_acquire_from_firmware(dev, mem->start, resource_size(mem));
 	if (ret) {
