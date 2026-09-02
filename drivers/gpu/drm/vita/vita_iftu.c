@@ -48,6 +48,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of_address.h>
@@ -637,22 +638,24 @@ static int vita_iftu_do_page_flip(struct drm_device *dev,
 				  struct vita_iftu_device *idev)
 {
 	u32 sel, new_sel, vblank, prev_vblank;
-	unsigned int spins = 0;
+	unsigned int polls = 0;
 
 	sel = readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0));
 	new_sel = sel ? 0 : 1;
 
 	/* Wait for a vblank edge: the flag toggles once per frame (~52 Hz
-	 * on PSTV, ~19 ms period). Bound the spin so a dead display cannot
-	 * hang the caller; 10000 iterations is far beyond a frame period.
+	 * on PSTV, ~19 ms period, so each phase lasts ~9.6 ms). Sleep-poll
+	 * with a small delay so the window spans several frame periods --
+	 * a tight bounded spin only covers ~1-5 ms and misses the edge.
+	 * Bound at ~200 ms; a dead display must not hang the caller.
 	 */
 	prev_vblank = readl(idev->plane_regs + IFTU_PREG_VBLANK_FLAG);
 	do {
+		usleep_range(500, 1000);
 		vblank = readl(idev->plane_regs + IFTU_PREG_VBLANK_FLAG);
 		if (vblank != prev_vblank)
 			break;
-		cpu_relax();
-	} while (++spins < 10000);
+	} while (++polls < 200);
 
 	if (vblank == prev_vblank) {
 		drm_err(dev, "vita-iftu: vblank flag not toggling; flip aborted\n");
@@ -661,8 +664,8 @@ static int vita_iftu_do_page_flip(struct drm_device *dev,
 
 	writel(new_sel, idev->control_regs + IFTU_CREG_PLANE_SEL(0));
 
-	drm_info(dev, "vita-iftu: page flip %u -> %u (vblank edge after %u spins)\n",
-		 sel, new_sel, spins);
+	drm_info(dev, "vita-iftu: page flip %u -> %u (vblank edge after %u polls)\n",
+		 sel, new_sel, polls);
 
 	return 0;
 }
