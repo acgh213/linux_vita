@@ -52,6 +52,7 @@
 #include <linux/io.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/seq_file.h>
 
 #include <drm/drm_aperture.h>
 #include <drm/drm_atomic.h>
@@ -59,6 +60,7 @@
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_damage_helper.h>
+#include <drm/drm_debugfs.h>
 #include <drm/drm_device.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_shmem.h>
@@ -92,6 +94,12 @@
 #define IFTU_CREG_CONTROL_ENABLE	BIT(0)
 #define IFTU_CREG_CONTROL2		0x04
 #define IFTU_CREG_PLANE_SEL(plane)	(0x10 + (plane) * 0x08)
+
+/* Per-frame vblank flag inside the planes window (0xE5031004 absolute),
+ * verified 2026-08-30: toggles 0..1 once per frame. Polled for the
+ * page-flip sync; the DSI IRQ (Gate A) is the DRM-side vblank source.
+ */
+#define IFTU_PREG_VBLANK_FLAG		0x1004
 
 /* DSI bus-1 interrupt block (relative to the "dsi" reg resource at
  * 0xE5060000). Hardware-verified 2026-08-30: status/ack +0x50 = 0xE
@@ -614,6 +622,66 @@ static void vita_iftu_program_second_config(struct drm_device *dev,
 		 second_fb_paddr);
 }
 
+/*
+ * M2 Gate C: one hardware page flip. Wait for the next vblank edge (the
+ * per-frame flag in the planes window), then toggle PLANE_A_SEL so the
+ * display switches between config 0 (inherited framebuffer) and config 1
+ * (second buffer). This is the first write to the selector register --
+ * the actual page flip. The DRM-side vblank event comes from the DSI IRQ
+ * (Gate A); this sync only ensures the selector write lands at the frame
+ * boundary, so the visible switch should be tear-free.
+ *
+ * The caller (debugfs "flip" show) reads the file to perform ONE flip.
+ */
+static int vita_iftu_do_page_flip(struct drm_device *dev,
+				  struct vita_iftu_device *idev)
+{
+	u32 sel, new_sel, vblank, prev_vblank;
+	unsigned int spins = 0;
+
+	sel = readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0));
+	new_sel = sel ? 0 : 1;
+
+	/* Wait for a vblank edge: the flag toggles once per frame (~52 Hz
+	 * on PSTV, ~19 ms period). Bound the spin so a dead display cannot
+	 * hang the caller; 10000 iterations is far beyond a frame period.
+	 */
+	prev_vblank = readl(idev->plane_regs + IFTU_PREG_VBLANK_FLAG);
+	do {
+		vblank = readl(idev->plane_regs + IFTU_PREG_VBLANK_FLAG);
+		if (vblank != prev_vblank)
+			break;
+		cpu_relax();
+	} while (++spins < 10000);
+
+	if (vblank == prev_vblank) {
+		drm_err(dev, "vita-iftu: vblank flag not toggling; flip aborted\n");
+		return -ETIMEDOUT;
+	}
+
+	writel(new_sel, idev->control_regs + IFTU_CREG_PLANE_SEL(0));
+
+	drm_info(dev, "vita-iftu: page flip %u -> %u (vblank edge after %u spins)\n",
+		 sel, new_sel, spins);
+
+	return 0;
+}
+
+static int vita_iftu_debugfs_flip_show(struct seq_file *m, void *data)
+{
+	struct drm_debugfs_entry *entry = m->private;
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(entry->dev);
+	int ret;
+
+	ret = vita_iftu_do_page_flip(entry->dev, idev);
+	if (ret) {
+		seq_puts(m, "flip failed\n");
+		return ret;
+	}
+	seq_puts(m, "flip ok\n");
+	return 0;
+}
+
 static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver *drv,
 							 struct platform_device *pdev)
 {
@@ -872,6 +940,14 @@ static int vita_iftu_probe(struct platform_device *pdev)
 		return ret;
 	}
 	drm_info(dev, "vita-iftu: vblank IRQ %d claimed\n", idev->irq);
+
+	/*
+	 * M2 Gate C: reading /sys/kernel/debug/dri/0/flip performs ONE
+	 * vblank-synced page flip (selector toggle). Supervised use only;
+	 * this is the first write to the selector register and the gate
+	 * runs it exactly once from a client, then verifies and rolls back.
+	 */
+	drm_debugfs_add_file(dev, "flip", vita_iftu_debugfs_flip_show, NULL);
 
 	/*
 	 * fbdev-console emulation DELIBERATELY DISABLED (2026-08-30).
