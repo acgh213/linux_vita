@@ -52,8 +52,17 @@
 	iftu1: display@e5030000 {
 		compatible = "vita,iftu";
 		reg = <0xe5030000 0x2000>,  /* plane A/B registers, bus 1 */
-		      <0xe5032000 0x1000>; /* control registers, bus 1   */
-		reg-names = "planes", "control";
+		      <0xe5032000 0x1000>, /* control registers, bus 1   */
+		      <0xe5060000 0x1000>; /* DSI bus-1 block (vblank IRQ) */
+		reg-names = "planes", "control", "dsi";
+		/*
+		 * DSI bus-1 vblank interrupt. VitaOS GIC code 210 (SceDsi1 /
+		 * SceDisplayVbStartHDMI) maps to GIC_SPI 178 = hardware IRQ
+		 * 210 (GIC_SPI N = IRQ N+32; see vita.dtsi SDIF comments).
+		 * The loader already arms the DSI-side mask (intr enable
+		 * +0x54 = 2); Linux must claim the line and ack via +0x50.
+		 */
+		interrupts = <GIC_SPI 178 IRQ_TYPE_LEVEL_HIGH>;
 		memory-region = <&hdmi_fb>;
 
 		/*
