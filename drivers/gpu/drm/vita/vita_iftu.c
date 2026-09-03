@@ -973,29 +973,31 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	 * points at the display atomic-commit path hanging or corrupting
 	 * scanout, not a full kernel panic.
 	 *
-	 * Prime suspect: vita_iftu_primary_plane_helper_atomic_disable()
-	 * unconditionally iosys_map_memset()s the ENTIRE live CDRAM
-	 * scanout buffer to zero. If atomic modeset's initial commit
-	 * disables the plane as a transient step (normal DRM atomic
-	 * sequencing) and the following re-enable/update stalls or fails
-	 * for any reason -- e.g. interaction with crtc_state->no_vblank,
-	 * or a bug in the drm_fb_blit() copy-back -- the screen is left
-	 * black with nothing to ever repaint it. This has NOT been
-	 * hardware-isolated yet; it is the leading theory, not a
-	 * confirmed root cause.
+	 * RESOLVED (2026-09-01): the B2 failures were root-caused and fixed
+	 * on hardware, and the corrected first atomic commit PASSED.
+	 *   - The B2 Oops was the driver memremap'ing the plane-register
+	 *     window (0xe5030000) instead of the DT memory-region (CDRAM
+	 *     0x20000000); the hard-gated mapping fix (mem->start ==
+	 *     0x20000000 && resource_size == 0x08000000) landed first.
+	 *   - atomic_disable() no longer memsets the live scanout buffer
+	 *     (see the disable callback above: trace-only, clear
+	 *     suppressed), so no transient disable can strand the display.
+	 *   - The M1 corrected trace confirmed the normal first enable is
+	 *     atomic_check -> begin_fb_access -> atomic_update ->
+	 *     end_fb_access: no initial atomic_disable, begin_fb_access
+	 *     returned 0, and the full-frame blit succeeded. The disable
+	 *     callback was entered only during teardown (after
+	 *     DRM_IOCTL_MODE_RMFB), with the clear suppressed.
+	 *   - M2 Gates A-D (vblank IRQ, inactive config, first vblank-synced
+	 *     page flip, bounded flips) all passed on hardware.
+	 * Records: lab/gpu-re/IFTU-B2-CORRECTED-RESULT-2026-09-01.md and
+	 * lab/gpu-re/IFTU-M2-GATE{A,B,C,D}-RESULT-2026-09-01.md (research
+	 * commits 5d47f54, 5f0fd77..4459066).
 	 *
-	 * Do not re-enable this call until:
-	 *   1. atomic_disable's memset is made conditional / safe (e.g.
-	 *      skip it, or confirm the plane is never spuriously disabled
-	 *      during the initial commit), and
-	 *   2. atomic_update has been exercised and verified on hardware
-	 *      by some means OTHER than the automatic fbdev-console commit
-	 *      (e.g. a deliberate modetest/dumb-buffer test with the
-	 *      device otherwise idle, so a hang doesn't take out the only
-	 *      video path with nothing left to fall back to).
-	 *
-	 * See lab/gpu-re/DRM-M1-SKELETON-2026-08-30.md for the deploy log
-	 * of both attempts.
+	 * Automatic fbdev-console takeover remains disabled and unvalidated.
+	 * Do not re-enable this call until the debugfs flip path is wired
+	 * into DRM's atomic page_flip API (userspace drmModePageFlip) and an
+	 * explicit fbdev-console gate passes on hardware.
 	 */
 
 	return 0;
