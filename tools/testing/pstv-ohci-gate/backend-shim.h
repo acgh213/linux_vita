@@ -64,6 +64,8 @@ typedef unsigned int gfp_t; typedef int pm_message_t;
 #define PM_HIBERNATION_PREPARE 2
 #define DEFINE_SHOW_ATTRIBUTE(name) static const struct file_operations name##_fops = { 0 }
 #define container_of(ptr,type,member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define writel_relaxed(v, addr) writel((v), (addr))
+#define EXPORT_SYMBOL_GPL(sym)
 
 typedef struct { int counter; } atomic_t;
 struct mutex { int locked; };
@@ -73,9 +75,15 @@ struct device_driver { const char *name; };
 struct device { struct device_driver *driver; struct device_node *of_node; int locked; int refs; };
 struct resource { unsigned long start, end; };
 struct usb_device;
-struct usb_bus { struct usb_device *root_hub; };
+struct usb_bus { struct usb_device *root_hub; struct device *controller; };
 struct usb_device { struct device dev; int state; struct usb_device *children[8]; int refs; int locked; int maxchild; };
-struct usb_hcd { struct usb_bus self; void __iomem *regs; int state; int hw_accessible; int refs; };
+struct usb_hcd { struct usb_bus self; void __iomem *regs; int state; int hw_accessible; int refs;
+	struct hc_driver *driver; unsigned long rsrc_start, rsrc_len; unsigned int irq; };
+struct hc_driver { const char *description; const char *product_desc; size_t hcd_priv_size;
+	int (*reset)(struct usb_hcd *); int (*start)(struct usb_hcd *); void (*stop)(struct usb_hcd *);
+	int (*hub_control)(struct usb_hcd *, u16, u16, u16, char *, u16); unsigned long flags; };
+struct ohci_driver_overrides { const char *product_desc; size_t extra_priv_size;
+	int (*reset)(struct usb_hcd *); };
 struct platform_device { struct device dev; struct resource resource; struct usb_hcd *drvdata; int refs; };
 struct irq_domain { int tag; };
 struct of_phandle_args { struct device_node *np; int args_count; u32 args[8]; };
@@ -108,6 +116,9 @@ struct shim_state {
 	int sleep_calls, ehci_frame_reads, event_seq, free_irq_seq, dma_free_seq, irq_dispose_seq;
 	int mapped_hwirq, domain_is_gic;
 	int pm_live, frame_frozen;
+	int hcd_creations, hcd_adds, hcd_removes, ohci_init_driver_calls, ohci_setup_calls;
+	int hcd_create_result, hcd_add_result, ohci_setup_result;
+	struct usb_hcd *created_hcd;
 };
 static struct shim_state shim;
 
@@ -216,7 +227,19 @@ static inline unsigned int irq_get_trigger_type(unsigned int irq)
 { (void)irq; return shim.wrong_trigger ? 1 : IRQ_TYPE_LEVEL_HIGH; }
 static inline void usb_unlock_device(struct usb_device *d) { assert(d->locked && shim.pdev.dev.locked); d->locked=0; shim.hub_unlocks++; }
 static inline void usb_get_hcd(struct usb_hcd *h) { h->refs++; shim.hcd_gets++; }
-static inline void usb_put_hcd(struct usb_hcd *h) { assert(h->refs > 0); h->refs--; shim.hcd_puts++; }
+static inline void usb_put_hcd(struct usb_hcd *h)
+{
+	if (!h)
+		return;
+	shim.hcd_puts++;
+	if (h == shim.created_hcd) {
+		free(h);
+		shim.created_hcd = NULL;
+		return;
+	}
+	assert(h->refs > 0);
+	h->refs--;
+}
 static inline struct usb_device *usb_get_dev(struct usb_device *d) { if (!d) return NULL; d->refs++; shim.hub_gets++; return d; }
 static inline void usb_put_dev(struct usb_device *d) { if (d) { assert(d->refs > 0); d->refs--; shim.hub_puts++; } }
 static inline void put_device(struct device *d) { assert(d->refs > 0); d->refs--; }
@@ -243,6 +266,17 @@ static inline int copy_from_user(void *d, const void *s, size_t n) { memcpy(d,s,
 static inline int sysfs_streq(const char *a, const char *b) { size_t n=strlen(a); while(n && (a[n-1]=='\n'||a[n-1]=='\r')) n--; return strlen(b)==n && !strncmp(a,b,n); }
 static inline void *kzalloc(size_t n, gfp_t f) { (void)f; return calloc(1,n); }
 static inline void kfree(void *p) { free(p); }
+static inline int usb_disabled(void) { return 0; }
+static inline struct usb_hcd *usb_create_hcd(const struct hc_driver *drv, struct device *dev, const char *n)
+{ (void)n; shim.hcd_creations++; if (!shim.hcd_create_result) return NULL; shim.created_hcd = calloc(1, sizeof(*shim.created_hcd)); shim.created_hcd->driver = (struct hc_driver *)drv; shim.created_hcd->self.controller = dev; return shim.created_hcd; }
+static inline int usb_add_hcd(struct usb_hcd *h, unsigned int irq, unsigned long f)
+{ (void)f; shim.hcd_adds++; h->irq = irq; return shim.hcd_add_result; }
+static inline void usb_remove_hcd(struct usb_hcd *h) { (void)h; shim.hcd_removes++; }
+static inline void ohci_init_driver(struct hc_driver *drv, const struct ohci_driver_overrides *over)
+{ shim.ohci_init_driver_calls++; memset(drv, 0, sizeof(*drv)); drv->description = "ohci_hcd";
+	if (over) { drv->product_desc = over->product_desc; drv->hcd_priv_size = 96 + over->extra_priv_size; drv->reset = over->reset; } }
+static inline int ohci_setup(struct usb_hcd *h) { shim.ohci_setup_calls++; return shim.ohci_setup_result; }
+static inline int ohci_init(struct usb_hcd *h) { return ohci_setup(h); }
 static inline void pr_info(const char *f, ...) { (void)f; }
 static inline void pr_err(const char *f, ...) { (void)f; }
 static inline void seq_printf(struct seq_file *s, const char *f, ...) { (void)s; (void)f; }
