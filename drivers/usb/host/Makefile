@@ -6,6 +6,9 @@
 # tell define_trace.h where to find the xhci trace header
 CFLAGS_xhci-trace.o := -I$(src)
 
+obj-$(CONFIG_USB_PSTV_OHCI_GATE) += pstv-ohci-diag.o
+pstv-ohci-diag-y := pstv-ohci-gate.o pstv-ohci-gate-core.o
+
 fhci-y := fhci-hcd.o fhci-hub.o fhci-q.o
 fhci-y += fhci-mem.o fhci-tds.o fhci-sched.o
 

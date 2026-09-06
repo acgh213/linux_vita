@@ -4,6 +4,17 @@
 #
 comment "USB Host Controller Drivers"
 
+config USB_PSTV_OHCI_GATE
+	bool "PSTV post-boot OHCI diagnostic gate (EXPERIMENTAL)"
+	depends on ARCH_VITA && USB=y && USB_EHCI_HCD_PLATFORM=y
+	depends on DEBUG_FS && PM && OF_IRQ && HAS_DMA
+	help
+	  Manual root-only read/reset/first-frame diagnostics of the PSTV
+	  bus-zero OHCI companion after EHCI has booted. No hardware access
+	  occurs until an explicit debugfs trigger. This is not a USB HCD.
+	  A failed stop quarantines DMA and prevents further experiments.
+	  Say N unless performing a supervised hardware bring-up experiment.
+
 config USB_C67X00_HCD
 	tristate "Cypress C67x00 HCD support"
 	depends on HAS_IOMEM
