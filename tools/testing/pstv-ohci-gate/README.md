@@ -22,8 +22,9 @@ The external PSTV Type-A port must remain empty for this controller-only test.
   warnings from `vita.dtsi` are recorded in the lab evidence.
 - Checkpatch reports 0 errors and 0 warnings for all three production files.
 - These tests and builds do not prove actual OHCI read/reset/frame/IRQ/DMA
-  behavior. No candidate has been deployed and no new hardware OHCI gate has
-  run. Independent final safety review and hardware validation remain pending.
+  behavior. The earlier diagnostic candidate's hardware gate passed, but this
+  HCD-wiring revision has not been deployed. Independent review and a new
+  hardware enumeration gate remain pending.
 
 ## Host sequencing/transaction harness
 

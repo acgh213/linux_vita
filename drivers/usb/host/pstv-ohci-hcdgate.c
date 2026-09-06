@@ -24,6 +24,7 @@
 
 static struct hc_driver gate_hc_driver;
 static bool hcd_active;
+static struct usb_hcd *active_hcd;
 
 /*
  * Sony's order differs from generic ohci_setup(): interrupts are masked and
@@ -62,16 +63,30 @@ int gate_hcd_up(struct platform_device *pdev, void __iomem *regs,
 		return -ENOMEM;
 	hcd->rsrc_start = HCDGATE_BASE;
 	hcd->rsrc_len = HCDGATE_SIZE;
+	hcd->skip_phy_initialization = 1;
+	hcd->speed = HCD_USB11;
 	hcd->regs = regs;
 	ret = usb_add_hcd(hcd, irq, 0);
 	if (ret) {
 		usb_put_hcd(hcd);
 		return ret;
 	}
+	active_hcd = hcd;
 	hcd_active = true;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(gate_hcd_up);
+
+void gate_hcd_down(void)
+{
+	if (!active_hcd)
+		return;
+	usb_remove_hcd(active_hcd);
+	usb_put_hcd(active_hcd);
+	active_hcd = NULL;
+	hcd_active = false;
+}
+EXPORT_SYMBOL_GPL(gate_hcd_down);
 
 bool gate_hcd_active(void)
 {

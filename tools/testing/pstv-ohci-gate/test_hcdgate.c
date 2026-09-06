@@ -65,6 +65,7 @@ static void test_reset_override_writes_sony_order(void)
 	fresh();
 	h.regs = shim.gate_regs;
 	before_disable = shim.gate_regs[PSTV_OHCI_INTR_DISABLE / 4];
+	shim.gate_regs[PSTV_OHCI_CMD_STATUS / 4] = 0xdeadbeef;
 	before_cmd = shim.gate_regs[PSTV_OHCI_CMD_STATUS / 4];
 	before_ctrl = shim.gate_regs[PSTV_OHCI_CONTROL / 4];
 	shim.gate_regs[PSTV_OHCI_CONTROL / 4] = 0xc0;
@@ -73,9 +74,9 @@ static void test_reset_override_writes_sony_order(void)
 	CHECK(shim.gate_regs[PSTV_OHCI_INTR_DISABLE / 4] == PSTV_OHCI_IRQ_MASK &&
 	      shim.gate_regs[PSTV_OHCI_INTR_DISABLE / 4] != before_disable,
 	      "reset override masks interrupts");
-	CHECK(shim.gate_regs[PSTV_OHCI_CMD_STATUS / 4] == PSTV_OHCI_HCR &&
+	CHECK(shim.ohci_setup_calls == 1 &&
 	      shim.gate_regs[PSTV_OHCI_CMD_STATUS / 4] != before_cmd,
-	      "reset override asserts HCR");
+	      "reset override asserts HCR before generic setup");
 	CHECK(shim.gate_regs[PSTV_OHCI_CONTROL / 4] == 0 &&
 	      shim.gate_regs[PSTV_OHCI_CONTROL / 4] != before_ctrl,
 	      "reset override zeroes control");

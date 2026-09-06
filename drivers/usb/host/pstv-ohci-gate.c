@@ -23,6 +23,7 @@
 #include <linux/usb/hcd.h>
 
 #include "pstv-ohci-gate-core.h"
+#include "pstv-ohci-hcdgate.h"
 
 #define GATE_BASE 0xe40e0200
 #define GATE_SIZE 0x100
@@ -194,23 +195,17 @@ static irqreturn_t gate_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static int gate_prepare_frame(void *ctx, u32 *dma)
+/*
+ * Map and validate the bus-zero OHCI interrupt. The frame stage and the HCD
+ * hand-off share this; only the frame stage additionally requests it.
+ */
+static int gate_map_irq(struct gate_session *g)
 {
-	struct gate_session *g = ctx;
 	struct of_phandle_args args;
 	struct irq_domain *domain;
 	struct irq_data *irq_data;
 	int ret;
 
-	static_assert(sizeof(struct gate_hcca) == 256);
-	g->hcca = dma_alloc_coherent(&g->pdev->dev, sizeof(*g->hcca),
-				     &g->dma, GFP_KERNEL);
-	if (!g->hcca)
-		return -ENOMEM;
-	if (!g->dma || upper_32_bits(g->dma) || (g->dma & 0xff))
-		return -EINVAL;
-	memset(g->hcca, 0, sizeof(*g->hcca));
-	dma_wmb();
 	ret = of_irq_parse_one(g->pdev->dev.of_node, 0, &args);
 	if (ret)
 		return ret;
@@ -238,6 +233,28 @@ static int gate_prepare_frame(void *ctx, u32 *dma)
 		ret = -EINVAL;
 		goto out_node;
 	}
+ out_node:
+	of_node_put(args.np);
+	return ret;
+}
+
+static int gate_prepare_frame(void *ctx, u32 *dma)
+{
+	struct gate_session *g = ctx;
+	int ret;
+
+	static_assert(sizeof(struct gate_hcca) == 256);
+	g->hcca = dma_alloc_coherent(&g->pdev->dev, sizeof(*g->hcca),
+				     &g->dma, GFP_KERNEL);
+	if (!g->hcca)
+		return -ENOMEM;
+	if (!g->dma || upper_32_bits(g->dma) || (g->dma & 0xff))
+		return -EINVAL;
+	memset(g->hcca, 0, sizeof(*g->hcca));
+	dma_wmb();
+	ret = gate_map_irq(g);
+	if (ret)
+		return ret;
 	init_completion(&g->sof);
 	atomic_set(&g->irq_count, 0);
 	atomic_set(&g->irq_errors, 0);
@@ -245,8 +262,6 @@ static int gate_prepare_frame(void *ctx, u32 *dma)
 	if (!ret)
 		g->irq_requested = true;
 	*dma = lower_32_bits(g->dma);
- out_node:
-	of_node_put(args.np);
 	return ret;
 }
 
@@ -390,6 +405,64 @@ static const struct pstv_ohci_gate_ops gate_ops = {
 	.release = gate_release,
 };
 
+/*
+ * HCD hand-off: bring the controller through the same read/reset admission,
+ * then register a real OHCI HCD on the mapped window. On success the HCD owns
+ * the controller; the gate keeps the PM hold, region, mapping and references
+ * alive until "hcd-down" removes it.
+ */
+static struct gate_session *hcd_gate_session;
+
+static int gate_hcd_bringup(struct gate_session *g)
+{
+	int ret;
+
+	ret = gate_acquire(g);
+	if (ret)
+		return ret;
+	ret = pstv_ohci_read_stage(&last_result, &gate_ops, g);
+	if (ret)
+		return ret;
+	/* Do not take over an active controller or firmware-owned schedules. */
+	if (last_result.control & (0x100 | 0x3c) ||
+	    (last_result.control & 0xc0) == 0x80 ||
+	    (last_result.control & 0xc0) == 0x40) {
+		ret = -EBUSY;
+		return ret;
+	}
+	ret = pstv_ohci_reset_stage(&last_result, &gate_ops, g);
+	if (ret)
+		return ret;
+	ret = gate_map_irq(g);
+	if (ret)
+		return ret;
+	return gate_hcd_up(g->pdev, g->regs, g->irq);
+}
+
+static void gate_hcd_cleanup(struct gate_session *g, int retain)
+{
+	last_result.cleanup_status = retain;
+	last_result.quarantined = !!retain;
+	gate_finish(g, retain);
+}
+
+static int gate_hcd_down_trigger(void)
+{
+	struct gate_session *g = hcd_gate_session;
+
+	if (!g)
+		return -EINVAL;
+	gate_hcd_down();
+	/* hcd-down leaves the controller stopped by ohci_stop; release gate. */
+	gate_finish(g, 0);
+	kfree(g);
+	hcd_gate_session = NULL;
+	attempted = true;
+	last_stage = 4;
+	last_result.status = 0;
+	return 0;
+}
+
 static ssize_t gate_trigger(struct file *file, const char __user *buffer,
 			    size_t count, loff_t *pos)
 {
@@ -413,6 +486,10 @@ static ssize_t gate_trigger(struct file *file, const char __user *buffer,
 		stage = 1;
 	else if (sysfs_streq(command, "frame"))
 		stage = 2;
+	else if (sysfs_streq(command, "hcd"))
+		stage = 3;
+	else if (sysfs_streq(command, "hcd-down"))
+		stage = 4;
 	else
 		return -EINVAL;
 	sleep_flags = lock_system_sleep();
@@ -422,6 +499,47 @@ static ssize_t gate_trigger(struct file *file, const char __user *buffer,
 	}
 	if (poisoned) {
 		ret = -EIO;
+		goto unlock;
+	}
+	if (stage == 4) {
+		ret = gate_hcd_down_trigger();
+		goto unlock;
+	}
+	if (stage == 3) {
+		if (hcd_gate_session || gate_hcd_active()) {
+			ret = -EBUSY;
+			goto unlock;
+		}
+		g = kzalloc(sizeof(*g), GFP_KERNEL);
+		if (!g) {
+			ret = -ENOMEM;
+			goto unlock;
+		}
+		last_stage = 3;
+		attempted = true;
+		pr_info("pstv-ohci-gate: hcd bring-up begin\n");
+		ret = gate_hcd_bringup(g);
+		if (!ret) {
+			hcd_gate_session = g;
+			last_result.status = 0;
+			pr_info("pstv-ohci-gate: hcd live (controller handed to OHCI core)\n");
+			goto unlock;
+		}
+		pr_info("pstv-ohci-gate: hcd bring-up failed rc=%d\n", ret);
+		/*
+		 * Mirror transaction cleanup: quarantine only when the stop
+		 * itself is unprovable; a controller that was never started
+		 * can release normally.
+		 */
+		if (last_result.phase >= PSTV_OHCI_PHASE_RESET) {
+			int stop = pstv_ohci_stop_stage(&last_result, &gate_ops, g);
+
+			gate_hcd_cleanup(g, !!stop);
+		} else {
+			gate_hcd_cleanup(g, 0);
+		}
+		if (!last_result.quarantined)
+			kfree(g);
 		goto unlock;
 	}
 	g = kzalloc(sizeof(*g), GFP_KERNEL);

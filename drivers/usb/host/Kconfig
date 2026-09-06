@@ -6,7 +6,7 @@ comment "USB Host Controller Drivers"
 
 config USB_PSTV_OHCI_GATE
 	bool "PSTV post-boot OHCI diagnostic gate (EXPERIMENTAL)"
-	depends on ARCH_VITA && USB=y && USB_EHCI_HCD_PLATFORM=y
+	depends on ARCH_VITA && USB=y && USB_EHCI_HCD_PLATFORM=y && USB_OHCI_HCD=y
 	depends on DEBUG_FS && PM && OF_IRQ && HAS_DMA
 	help
 	  Manual root-only read/reset/first-frame diagnostics of the PSTV

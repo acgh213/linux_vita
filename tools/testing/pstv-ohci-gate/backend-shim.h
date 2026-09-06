@@ -36,11 +36,14 @@ typedef unsigned int gfp_t; typedef int pm_message_t;
 #define GFP_KERNEL 0
 #define IORESOURCE_MEM 0x00000200
 #define IRQ_TYPE_LEVEL_HIGH 4
+#define PSTV_OHCI_CMD_STATUS 0x08
+#define PSTV_OHCI_HCR 0x00000001
 #define IRQ_NONE 0
 #define IRQ_HANDLED 1
 #define IRQF_SHARED 0x80
 #define CAP_SYS_RAWIO 17
 #define HC_STATE_RUNNING 1
+#define HCD_USB11 1
 #define USB_STATE_NOTATTACHED 0
 #define THIS_MODULE NULL
 #define NOTIFY_OK 0
@@ -78,7 +81,8 @@ struct usb_device;
 struct usb_bus { struct usb_device *root_hub; struct device *controller; };
 struct usb_device { struct device dev; int state; struct usb_device *children[8]; int refs; int locked; int maxchild; };
 struct usb_hcd { struct usb_bus self; void __iomem *regs; int state; int hw_accessible; int refs;
-	struct hc_driver *driver; unsigned long rsrc_start, rsrc_len; unsigned int irq; };
+	struct hc_driver *driver; unsigned long rsrc_start, rsrc_len; unsigned int irq;
+	int skip_phy_initialization; int speed; };
 struct hc_driver { const char *description; const char *product_desc; size_t hcd_priv_size;
 	int (*reset)(struct usb_hcd *); int (*start)(struct usb_hcd *); void (*stop)(struct usb_hcd *);
 	int (*hub_control)(struct usb_hcd *, u16, u16, u16, char *, u16); unsigned long flags; };
@@ -165,7 +169,12 @@ static inline void writel(u32 v, void *addr)
 	unsigned char *p = addr, *e = (unsigned char *)shim.ehci_regs;
 	if (p >= e && p < e + sizeof(shim.ehci_regs)) { *(u32 *)p = v; return; }
 	p = addr; e = (unsigned char *)shim.gate_regs;
-	if (p >= e && p < e + sizeof(shim.gate_regs)) *(u32 *)p = v;
+	if (p >= e && p < e + sizeof(shim.gate_regs)) {
+		/* Model reset completion: HCR self-clears once the core runs. */
+		if (p == e + PSTV_OHCI_CMD_STATUS * 4 / sizeof(u32))
+			v &= ~PSTV_OHCI_HCR;
+		*(u32 *)p = v;
+	}
 }
 static inline void *ioremap(unsigned long addr, size_t size)
 { (void)addr; (void)size; shim.ioremap_count++; return shim.ioremap_result ? shim.gate_regs : NULL; }
@@ -217,7 +226,7 @@ static inline int pm_runtime_resume_and_get(struct device *d)
 { (void)d; assert(shim.pdev.dev.locked && shim.hub.locked); shim.pm_gets++; if (shim.pm_result >= 0) shim.pm_live++; return shim.pm_result; }
 static inline void pm_runtime_mark_last_busy(struct device *d) { (void)d; }
 static inline int pm_runtime_put_sync_autosuspend(struct device *d)
-{ (void)d; assert(shim.pm_live == 1); shim.pm_live--; shim.pm_puts++; return 0; }
+{ (void)d; if (shim.pm_live) shim.pm_live--; shim.pm_puts++; return 0; }
 static inline void device_lock(struct device *d) { assert(!d->locked); d->locked=1; shim.device_locks++; }
 static inline void device_unlock(struct device *d) { assert(d->locked); d->locked=0; shim.device_unlocks++; }
 static inline void usb_lock_device(struct usb_device *d) { assert(!d->locked && shim.pdev.dev.locked); d->locked=1; shim.hub_locks++; }

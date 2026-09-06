@@ -2,13 +2,25 @@
 /* Host tests include and exercise the actual backend, never a copy. */
 #include "backend-shim.h"
 #include "../../../drivers/usb/host/pstv-ohci-gate.c"
+#include "../../../drivers/usb/host/pstv-ohci-hcdgate.c"
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { fprintf(stderr, "FAIL: %s\n", m); failures++; } } while (0)
 
 static void fresh(void)
 {
+	if (gate_hcd_active()) {
+		gate_hcd_down();
+		if (hcd_gate_session) {
+			gate_finish(hcd_gate_session, 0);
+			kfree(hcd_gate_session);
+			hcd_gate_session = NULL;
+		}
+		hcd_active = false;
+	}
 	shim_reset();
+	if (!gate_hcd_active())
+		hcd_gate_session = NULL;
 	poisoned = false; attempted = false; last_stage = 0; last_result = (struct pstv_ohci_gate_result){0};
 }
 
@@ -141,11 +153,58 @@ static void test_trigger_validation(void)
 	CHECK(shim.readl_count==0 && shim.irq_requests==0, "invalid trigger has no hardware actions");
 }
 
+static void test_hcd_trigger_registers_and_refuses(void)
+{
+	struct file f={0}; loff_t pos=0;
+	const char *cmd="hcd";
+	size_t n=3;
+
+	/* Existing child: admission must refuse before any HCD work. */
+	fresh();
+	{
+		static struct usb_device child;
+
+		shim.hub.children[0] = &child;
+	}
+	CHECK(gate_trigger(&f, cmd, n, &pos) < 0, "hcd trigger refused with child attached");
+	CHECK(shim.hcd_creations == 0, "no hcd created on refused admission");
+
+	/* Clean bus: registration goes through the real gate_hcd_up path. */
+	fresh(); shim.hcd_create_result=1; shim.hcd_add_result=0;
+	shim.gate_regs[0]=0x10; /* revision */
+	{
+		ssize_t ret = gate_trigger(&f, cmd, n, &pos);
+		if (ret != (ssize_t)n)
+			fprintf(stderr, "hcd trigger ret=%zd phase=%u status=%d cleanup=%d creates=%d adds=%d pm=%d\\n",
+				ret, last_result.phase, last_result.status,
+				last_result.cleanup_status, shim.hcd_creations,
+				shim.hcd_adds, shim.pm_live);
+		CHECK(ret == (ssize_t)n, "hcd trigger accepted");
+	}
+	CHECK(shim.hcd_creations == 1 && shim.hcd_adds == 1, "hcd registered through trigger");
+	CHECK(shim.irq_requests == 0, "gate does not request the IRQ in hcd mode");
+}
+
+static void test_hcddown_trigger(void)
+{
+	struct file f={0}; loff_t pos=0;
+
+	fresh(); shim.hcd_create_result=1; shim.hcd_add_result=0;
+	shim.gate_regs[0]=0x10;
+	CHECK(gate_trigger(&f, "hcd", 3, &pos) == 3, "hcd trigger accepted");
+	CHECK(gate_hcd_active(), "hcd active after trigger");
+	CHECK(gate_trigger(&f, "hcd-down", 8, &pos) == 8, "hcd-down accepted");
+	CHECK(!gate_hcd_active(), "hcd inactive after hcd-down");
+	CHECK(shim.hcd_removes == 1, "usb_remove_hcd called once");
+}
+
 int main(void)
 {
 	test_acquire_failures(); test_normal_acquire_balances(); test_child_hub_is_exclusive();
 	test_irq_description_validation(); test_mapping_race_does_not_dispose_shared();
 	test_release_order_and_poison(); test_trigger_validation();
-	if (failures) { fprintf(stderr,"backend tests: %d failure(s)\n", failures); return 1; }
+	test_hcd_trigger_registers_and_refuses();
+	test_hcddown_trigger();
+	if (failures) { fprintf(stderr, "backend tests: %d failure(s)\n", failures); return 1; }
 	puts("backend tests: PASS"); return 0;
 }
