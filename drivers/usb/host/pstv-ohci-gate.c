@@ -363,11 +363,11 @@ static void gate_finish(void *ctx, int retain)
 			pm_runtime_put_sync_autosuspend(&g->hub->dev);
 		}
 	}
-	if (g->hub_locked)
-		usb_unlock_device(g->hub);
-	if (g->controller_locked)
-		device_unlock(&g->pdev->dev);
 	if (!retain) {
+		if (g->hub_locked)
+			usb_unlock_device(g->hub);
+		if (g->controller_locked)
+			device_unlock(&g->pdev->dev);
 		usb_put_dev(g->hub);
 		if (g->hcd)
 			usb_put_hcd(g->hcd);

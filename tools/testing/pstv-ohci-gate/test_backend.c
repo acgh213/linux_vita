@@ -125,7 +125,8 @@ static void test_release_order_and_poison(void)
 	gate_finish(g,1);
 	CHECK(poisoned && shim.irq_disables==1, "poison disables owned IRQ");
 	CHECK(shim.irq_frees==0 && shim.dma_frees==0 && shim.region_held==1 && shim.pm_puts==0, "poison retains hardware resources");
-	CHECK(shim.device_unlocks==1 && shim.hub_unlocks==1, "poison unlocks devices");
+	CHECK(shim.device_unlocks==0 && shim.hub_unlocks==0 && shim.pdev.dev.locked && shim.hub.locked,
+	      "poison retains device and hub locks to block teardown");
 	CHECK(shim.pdev.dev.refs == 1 && shim.hcd.refs == 1 && shim.hub.refs == 1 && shim.pm_live == 1,
 	      "poison retains all device references and the runtime PM hold");
 	free(g->hcca); g->hcca=NULL; iounmap(g->regs); shim.region_held=0;
