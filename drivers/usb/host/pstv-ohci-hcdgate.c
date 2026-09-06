@@ -25,6 +25,8 @@
 static struct hc_driver gate_hc_driver;
 static bool hcd_active;
 static struct usb_hcd *active_hcd;
+static struct usb_hcd *saved_ehci_hcd;
+static struct device *saved_drvdata_dev;
 
 /*
  * Sony's order differs from generic ohci_setup(): interrupts are masked and
@@ -47,20 +49,34 @@ static const struct ohci_driver_overrides gate_overrides = {
 /*
  * gate_hcd_up - register a real OHCI HCD on the proven gate window.
  * Caller must hold the EHCI device lock, root-hub lock, and PM hold, and
+ * @pdev: EHCI platform device whose hardware owns the companion window
+ * @regs: mapped OHCI companion register window
+ * @irq: validated GIC virtual IRQ for the OHCI companion
+ * @old_hcd: original EHCI HCD drvdata to restore after handoff
+ *
  * must have the OHCI registers mapped and the IRQ mapped/requested.
  */
 int gate_hcd_up(struct platform_device *pdev, void __iomem *regs,
-		unsigned int irq)
+		unsigned int irq, struct usb_hcd *old_hcd)
 {
 	struct usb_hcd *hcd;
 	int ret;
 
 	if (hcd_active)
 		return -EBUSY;
+	if (!old_hcd || !pdev)
+		return -EINVAL;
 	ohci_init_driver(&gate_hc_driver, &gate_overrides);
+	saved_drvdata_dev = &pdev->dev;
+	saved_ehci_hcd = old_hcd;
 	hcd = usb_create_hcd(&gate_hc_driver, &pdev->dev, "pstv-ohci-hcd");
-	if (!hcd)
+	if (!hcd) {
+		saved_drvdata_dev = NULL;
+		saved_ehci_hcd = NULL;
 		return -ENOMEM;
+	}
+	/* usb_create_hcd() temporarily installs OHCI drvdata on this device. */
+	dev_set_drvdata(saved_drvdata_dev, saved_ehci_hcd);
 	hcd->rsrc_start = HCDGATE_BASE;
 	hcd->rsrc_len = HCDGATE_SIZE;
 	hcd->skip_phy_initialization = 1;
@@ -68,9 +84,13 @@ int gate_hcd_up(struct platform_device *pdev, void __iomem *regs,
 	hcd->regs = regs;
 	ret = usb_add_hcd(hcd, irq, 0);
 	if (ret) {
+		dev_set_drvdata(saved_drvdata_dev, saved_ehci_hcd);
+		saved_drvdata_dev = NULL;
+		saved_ehci_hcd = NULL;
 		usb_put_hcd(hcd);
 		return ret;
 	}
+	dev_set_drvdata(saved_drvdata_dev, saved_ehci_hcd);
 	active_hcd = hcd;
 	hcd_active = true;
 	return 0;
@@ -83,6 +103,10 @@ void gate_hcd_down(void)
 		return;
 	usb_remove_hcd(active_hcd);
 	usb_put_hcd(active_hcd);
+	if (saved_drvdata_dev)
+		dev_set_drvdata(saved_drvdata_dev, saved_ehci_hcd);
+	saved_drvdata_dev = NULL;
+	saved_ehci_hcd = NULL;
 	active_hcd = NULL;
 	hcd_active = false;
 }

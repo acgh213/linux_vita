@@ -123,6 +123,7 @@ struct shim_state {
 	int hcd_creations, hcd_adds, hcd_removes, ohci_init_driver_calls, ohci_setup_calls;
 	int hcd_create_result, hcd_add_result, ohci_setup_result;
 	struct usb_hcd *created_hcd;
+	void *last_drvdata;
 };
 static struct shim_state shim;
 
@@ -196,6 +197,7 @@ static inline void of_node_put(struct device_node *n) { if (n) shim.node_puts++;
 static inline struct resource *platform_get_resource(struct platform_device *p, unsigned t, unsigned i)
 { (void)t; (void)i; return p ? &p->resource : NULL; }
 static inline void *platform_get_drvdata(struct platform_device *p) { return p ? p->drvdata : NULL; }
+static inline void dev_set_drvdata(struct device *d, void *data) { if (d == &shim.pdev.dev) { shim.pdev.drvdata = data; shim.last_drvdata = data; } }
 static inline int of_irq_parse_one(struct device_node *n, int i, struct of_phandle_args *a)
 { (void)n; (void)i; if (shim.irq_parse_result) return shim.irq_parse_result; a->np = &shim.irq_node; a->args_count=3; a->args[0]=0; a->args[1]=114; a->args[2]=shim.wrong_trigger ? 1 : IRQ_TYPE_LEVEL_HIGH; return 0; }
 static inline struct irq_domain *irq_find_host(struct device_node *n)
@@ -280,7 +282,8 @@ static inline struct usb_hcd *usb_create_hcd(const struct hc_driver *drv, struct
 { (void)n; shim.hcd_creations++; if (!shim.hcd_create_result) return NULL; shim.created_hcd = calloc(1, sizeof(*shim.created_hcd)); shim.created_hcd->driver = (struct hc_driver *)drv; shim.created_hcd->self.controller = dev; return shim.created_hcd; }
 static inline int usb_add_hcd(struct usb_hcd *h, unsigned int irq, unsigned long f)
 { (void)f; shim.hcd_adds++; h->irq = irq; return shim.hcd_add_result; }
-static inline void usb_remove_hcd(struct usb_hcd *h) { (void)h; shim.hcd_removes++; }
+static inline void usb_remove_hcd(struct usb_hcd *h)
+{ (void)h; shim.hcd_removes++; if (shim.created_hcd) shim.pdev.drvdata = &shim.hcd; }
 static inline void ohci_init_driver(struct hc_driver *drv, const struct ohci_driver_overrides *over)
 { shim.ohci_init_driver_calls++; memset(drv, 0, sizeof(*drv)); drv->description = "ohci_hcd";
 	if (over) { drv->product_desc = over->product_desc; drv->hcd_priv_size = 96 + over->extra_priv_size; drv->reset = over->reset; } }

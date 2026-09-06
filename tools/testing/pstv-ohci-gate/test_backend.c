@@ -183,6 +183,9 @@ static void test_hcd_trigger_registers_and_refuses(void)
 	}
 	CHECK(shim.hcd_creations == 1 && shim.hcd_adds == 1, "hcd registered through trigger");
 	CHECK(shim.irq_requests == 0, "gate does not request the IRQ in hcd mode");
+	CHECK(shim.hub_unlocks == 1, "root-hub lock released after HCD handoff");
+	CHECK(gate_pm_notify(NULL, PM_SUSPEND_PREPARE, NULL) == NOTIFY_BAD,
+	      "suspend rejected while HCD session is live");
 }
 
 static void test_hcddown_trigger(void)

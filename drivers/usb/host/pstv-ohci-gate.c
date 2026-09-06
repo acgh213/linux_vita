@@ -412,6 +412,12 @@ static const struct pstv_ohci_gate_ops gate_ops = {
  * alive until "hcd-down" removes it.
  */
 static struct gate_session *hcd_gate_session;
+static bool hcd_transition;
+
+static bool gate_hcd_live(void)
+{
+	return hcd_gate_session || hcd_transition;
+}
 
 static int gate_hcd_bringup(struct gate_session *g)
 {
@@ -436,7 +442,13 @@ static int gate_hcd_bringup(struct gate_session *g)
 	ret = gate_map_irq(g);
 	if (ret)
 		return ret;
-	return gate_hcd_up(g->pdev, g->regs, g->irq);
+	ret = gate_hcd_up(g->pdev, g->regs, g->irq, g->hcd);
+	if (ret)
+		return ret;
+	/* usb_remove_hcd() must lock/disconnect root hubs at hcd-down. */
+	usb_unlock_device(g->hub);
+	g->hub_locked = false;
+	return 0;
 }
 
 static void gate_hcd_cleanup(struct gate_session *g, int retain)
@@ -452,11 +464,13 @@ static int gate_hcd_down_trigger(void)
 
 	if (!g)
 		return -EINVAL;
+	hcd_transition = true;
 	gate_hcd_down();
 	/* hcd-down leaves the controller stopped by ohci_stop; release gate. */
 	gate_finish(g, 0);
 	kfree(g);
 	hcd_gate_session = NULL;
+	hcd_transition = false;
 	attempted = true;
 	last_stage = 4;
 	last_result.status = 0;
@@ -515,12 +529,14 @@ static ssize_t gate_trigger(struct file *file, const char __user *buffer,
 			ret = -ENOMEM;
 			goto unlock;
 		}
+		hcd_transition = true;
 		last_stage = 3;
 		attempted = true;
 		pr_info("pstv-ohci-gate: hcd bring-up begin\n");
 		ret = gate_hcd_bringup(g);
 		if (!ret) {
 			hcd_gate_session = g;
+			hcd_transition = false;
 			last_result.status = 0;
 			pr_info("pstv-ohci-gate: hcd live (controller handed to OHCI core)\n");
 			goto unlock;
@@ -540,6 +556,7 @@ static ssize_t gate_trigger(struct file *file, const char __user *buffer,
 		}
 		if (!last_result.quarantined)
 			kfree(g);
+		hcd_transition = false;
 		goto unlock;
 	}
 	g = kzalloc(sizeof(*g), GFP_KERNEL);
@@ -596,7 +613,7 @@ static int gate_pm_notify(struct notifier_block *nb, unsigned long event, void *
 		return NOTIFY_DONE;
 	if (!mutex_trylock(&gate_lock))
 		return NOTIFY_BAD;
-	if (poisoned)
+	if (poisoned || gate_hcd_live())
 		ret = NOTIFY_BAD;
 	mutex_unlock(&gate_lock);
 	return ret;

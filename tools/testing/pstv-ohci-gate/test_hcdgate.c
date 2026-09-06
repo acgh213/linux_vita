@@ -16,7 +16,7 @@ static void test_hcd_up_and_flags(void)
 {
 	fresh();
 	shim.hcd_create_result = 1; shim.hcd_add_result = 0;
-	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42) == 0,
+	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42, &shim.hcd) == 0,
 	      "hcd registration succeeds on live gate");
 	CHECK(shim.hcd_creations == 1 && shim.hcd_adds == 1,
 	      "one hcd created and added");
@@ -24,16 +24,21 @@ static void test_hcd_up_and_flags(void)
 	      "ohci driver table initialized once");
 	CHECK(shim.created_hcd && shim.created_hcd->driver == &gate_hc_driver,
 	      "hcd carries the vita hc_driver");
+	CHECK(shim.pdev.drvdata == &shim.hcd,
+	      "original EHCI drvdata restored after HCD creation");
+	CHECK(shim.last_drvdata == &shim.hcd,
+	      "HCD creation does not leave stale drvdata");
 	CHECK(shim.created_hcd->rsrc_start == HCDGATE_BASE &&
 	      shim.created_hcd->rsrc_len == HCDGATE_SIZE,
 	      "hcd resource window matches OHCI companion");
 	CHECK(shim.created_hcd->irq == 42, "hcd uses the provided IRQ");
 	CHECK(gate_hcd_active(), "gate reports active hcd");
-	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42) == -EBUSY,
+	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42, &shim.hcd) == -EBUSY,
 	      "second registration refused while active");
-	usb_remove_hcd(shim.created_hcd);
-	usb_put_hcd(shim.created_hcd);
-	hcd_active = false;
+	gate_hcd_down();
+	CHECK(shim.pdev.drvdata == &shim.hcd,
+	      "original EHCI drvdata restored after HCD teardown");
+	CHECK(!gate_hcd_active(), "teardown clears active state");
 	CHECK(shim.created_hcd == NULL, "teardown releases the hcd allocation");
 }
 
@@ -41,7 +46,7 @@ static void test_hcd_create_failure(void)
 {
 	fresh();
 	shim.hcd_create_result = 0;
-	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42) == -ENOMEM,
+	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42, &shim.hcd) == -ENOMEM,
 	      "usb_create_hcd failure returns -ENOMEM");
 	CHECK(shim.hcd_adds == 0 && !gate_hcd_active(),
 	      "no hcd added or marked active on create failure");
@@ -51,7 +56,7 @@ static void test_hcd_add_failure(void)
 {
 	fresh();
 	shim.hcd_create_result = 1; shim.hcd_add_result = -EINVAL;
-	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42) == -EINVAL,
+	CHECK(gate_hcd_up(&shim.pdev, shim.gate_regs, 42, &shim.hcd) == -EINVAL,
 	      "usb_add_hcd failure propagated");
 	CHECK(!gate_hcd_active(), "failed add does not mark hcd active");
 	CHECK(shim.created_hcd == NULL, "failed add released the hcd allocation");
