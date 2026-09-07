@@ -153,6 +153,35 @@ static void test_trigger_validation(void)
 	CHECK(shim.readl_count==0 && shim.irq_requests==0, "invalid trigger has no hardware actions");
 }
 
+static void test_hcd_live_rejects_normal_stages(void)
+{
+	struct file f={0}; loff_t pos=0;
+	const char *stages[] = { "read", "reset", "frame" };
+	unsigned i;
+
+	fresh(); shim.hcd_create_result=1; shim.hcd_add_result=0;
+	CHECK(gate_trigger(&f, "hcd", 3, &pos) == 3, "hcd live for stage rejection");
+	for (i = 0; i < 3; i++)
+		CHECK(gate_trigger(&f, stages[i], strlen(stages[i]), &pos) == -EBUSY,
+		      "normal stage rejected while HCD is live");
+	CHECK(gate_trigger(&f, "hcd-down", 8, &pos) == 8,
+	      "hcd-down remains available after stage rejection");
+}
+
+static void test_hcd_bringup_uses_fresh_phase(void)
+{
+	struct file f={0}; loff_t pos=0;
+
+	fresh(); shim.gate_regs[0]=0x10;
+	CHECK(gate_trigger(&f, "read", 4, &pos) == 4,
+	      "read stage completes before HCD retry");
+	shim.hcd_create_result=1; shim.hcd_add_result=0;
+	CHECK(gate_trigger(&f, "hcd", 3, &pos) == 3,
+	      "HCD bring-up starts from an independent phase");
+	CHECK(gate_trigger(&f, "hcd-down", 8, &pos) == 8,
+	      "HCD retry teardown succeeds");
+}
+
 static void test_hcd_trigger_registers_and_refuses(void)
 {
 	struct file f={0}; loff_t pos=0;
@@ -220,6 +249,7 @@ int main(void)
 	test_acquire_failures(); test_normal_acquire_balances(); test_child_hub_is_exclusive();
 	test_irq_description_validation(); test_mapping_race_does_not_dispose_shared();
 	test_release_order_and_poison(); test_trigger_validation();
+	test_hcd_live_rejects_normal_stages(); test_hcd_bringup_uses_fresh_phase();
 	test_hcd_trigger_registers_and_refuses();
 	test_hcddown_trigger();
 	if (failures) { fprintf(stderr, "backend tests: %d failure(s)\n", failures); return 1; }

@@ -422,22 +422,25 @@ static bool gate_hcd_live(void)
 
 static int gate_hcd_bringup(struct gate_session *g)
 {
+	struct pstv_ohci_gate_result hcd_result = {
+		.phase = PSTV_OHCI_PHASE_IDLE,
+	};
 	int ret;
 
 	ret = gate_acquire(g);
 	if (ret)
 		return ret;
-	ret = pstv_ohci_read_stage(&last_result, &gate_ops, g);
+	ret = pstv_ohci_read_stage(&hcd_result, &gate_ops, g);
 	if (ret)
 		return ret;
 	/* Do not take over an active controller or firmware-owned schedules. */
-	if (last_result.control & (0x100 | 0x3c) ||
-	    (last_result.control & 0xc0) == 0x80 ||
-	    (last_result.control & 0xc0) == 0x40) {
+	if (hcd_result.control & (0x100 | 0x3c) ||
+	    (hcd_result.control & 0xc0) == 0x80 ||
+	    (hcd_result.control & 0xc0) == 0x40) {
 		ret = -EBUSY;
 		return ret;
 	}
-	ret = pstv_ohci_reset_stage(&last_result, &gate_ops, g);
+	ret = pstv_ohci_reset_stage(&hcd_result, &gate_ops, g);
 	if (ret)
 		return ret;
 	ret = gate_map_irq(g);
@@ -523,6 +526,10 @@ static ssize_t gate_trigger(struct file *file, const char __user *buffer,
 	}
 	if (stage == 4) {
 		ret = gate_hcd_down_trigger();
+		goto unlock;
+	}
+	if (gate_hcd_live()) {
+		ret = -EBUSY;
 		goto unlock;
 	}
 	if (stage == 3) {
