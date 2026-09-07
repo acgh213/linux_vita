@@ -65,6 +65,7 @@ typedef unsigned int gfp_t; typedef int pm_message_t;
 #define DEFINE_MUTEX(name) struct mutex name = { 0 }
 #define PM_SUSPEND_PREPARE 1
 #define PM_HIBERNATION_PREPARE 2
+#define PM_RESTORE_PREPARE 3
 #define DEFINE_SHOW_ATTRIBUTE(name) static const struct file_operations name##_fops = { 0 }
 #define container_of(ptr,type,member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #define writel_relaxed(v, addr) writel((v), (addr))
@@ -78,7 +79,7 @@ struct device_driver { const char *name; };
 struct device { struct device_driver *driver; struct device_node *of_node; int locked; int refs; };
 struct resource { unsigned long start, end; };
 struct usb_device;
-struct usb_bus { struct usb_device *root_hub; struct device *controller; };
+struct usb_bus { struct usb_device *root_hub; struct device *controller; struct usb_bus *hs_companion; };
 struct usb_device { struct device dev; int state; struct usb_device *children[8]; int refs; int locked; int maxchild; };
 struct usb_hcd { struct usb_bus self; void __iomem *regs; int state; int hw_accessible; int refs;
 	struct hc_driver *driver; unsigned long rsrc_start, rsrc_len; unsigned int irq;
@@ -281,7 +282,7 @@ static inline int usb_disabled(void) { return 0; }
 static inline struct usb_hcd *usb_create_hcd(const struct hc_driver *drv, struct device *dev, const char *n)
 { (void)n; shim.hcd_creations++; if (!shim.hcd_create_result) return NULL; shim.created_hcd = calloc(1, sizeof(*shim.created_hcd)); shim.created_hcd->driver = (struct hc_driver *)drv; shim.created_hcd->self.controller = dev; return shim.created_hcd; }
 static inline int usb_add_hcd(struct usb_hcd *h, unsigned int irq, unsigned long f)
-{ (void)f; shim.hcd_adds++; h->irq = irq; return shim.hcd_add_result; }
+{ (void)f; shim.hcd_adds++; h->irq = irq; h->self.root_hub = &shim.hub; return shim.hcd_add_result; }
 static inline void usb_remove_hcd(struct usb_hcd *h)
 { (void)h; shim.hcd_removes++; if (shim.created_hcd) shim.pdev.drvdata = &shim.hcd; }
 static inline void ohci_init_driver(struct hc_driver *drv, const struct ohci_driver_overrides *over)

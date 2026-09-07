@@ -24,6 +24,22 @@ static void test_hcd_up_and_flags(void)
 	      "ohci driver table initialized once");
 	CHECK(shim.created_hcd && shim.created_hcd->driver == &gate_hc_driver,
 	      "hcd carries the vita hc_driver");
+	CHECK(gate_hcd_set_companion(&shim.hcd) == 0,
+	      "companion relation installs successfully");
+	CHECK(shim.created_hcd->self.hs_companion == &shim.hcd.self,
+	      "OHCI bus points at EHCI companion");
+	CHECK(gate_hcd_set_companion(NULL) == -EINVAL,
+	      "missing EHCI companion is rejected");
+	CHECK(gate_hcd_set_companion(&shim.hcd) == 0,
+	      "companion relation setter is idempotent");
+	CHECK(shim.created_hcd->self.hs_companion == &shim.hcd.self,
+	      "companion relation remains stable");
+	CHECK(shim.created_hcd->self.root_hub == &shim.hub &&
+	      shim.created_hcd->self.controller == &shim.pdev.dev,
+	      "OHCI topology is populated");
+	CHECK(shim.created_hcd->self.hs_companion->root_hub == shim.hcd.self.root_hub &&
+	      shim.created_hcd->self.hs_companion->controller == shim.hcd.self.controller,
+	      "companion topology is populated");
 	CHECK(shim.pdev.drvdata == &shim.hcd,
 	      "original EHCI drvdata restored after HCD creation");
 	CHECK(shim.last_drvdata == &shim.hcd,

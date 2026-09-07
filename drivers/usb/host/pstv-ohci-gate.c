@@ -445,6 +445,11 @@ static int gate_hcd_bringup(struct gate_session *g)
 	ret = gate_hcd_up(g->pdev, g->regs, g->irq, g->hcd);
 	if (ret)
 		return ret;
+	ret = gate_hcd_set_companion(g->hcd);
+	if (ret) {
+		gate_hcd_down();
+		return ret;
+	}
 	/* usb_remove_hcd() must lock/disconnect root hubs at hcd-down. */
 	usb_unlock_device(g->hub);
 	g->hub_locked = false;
@@ -609,7 +614,8 @@ static int gate_pm_notify(struct notifier_block *nb, unsigned long event, void *
 {
 	int ret = NOTIFY_OK;
 
-	if (event != PM_SUSPEND_PREPARE && event != PM_HIBERNATION_PREPARE)
+	if (event != PM_SUSPEND_PREPARE && event != PM_HIBERNATION_PREPARE &&
+	    event != PM_RESTORE_PREPARE)
 		return NOTIFY_DONE;
 	if (!mutex_trylock(&gate_lock))
 		return NOTIFY_BAD;

@@ -10,6 +10,7 @@ struct usb_hcd;
 
 int gate_hcd_up(struct platform_device *pdev, void __iomem *regs,
 		unsigned int irq, struct usb_hcd *old_hcd);
+int gate_hcd_set_companion(struct usb_hcd *ehci);
 void gate_hcd_down(void);
 bool gate_hcd_active(void);
 

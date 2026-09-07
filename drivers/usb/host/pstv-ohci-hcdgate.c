@@ -97,6 +97,16 @@ int gate_hcd_up(struct platform_device *pdev, void __iomem *regs,
 }
 EXPORT_SYMBOL_GPL(gate_hcd_up);
 
+int gate_hcd_set_companion(struct usb_hcd *ehci)
+{
+	if (!active_hcd || !ehci || !active_hcd->self.root_hub ||
+	    !ehci->self.root_hub)
+		return -EINVAL;
+	active_hcd->self.hs_companion = &ehci->self;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gate_hcd_set_companion);
+
 void gate_hcd_down(void)
 {
 	if (!active_hcd)

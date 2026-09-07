@@ -186,6 +186,10 @@ static void test_hcd_trigger_registers_and_refuses(void)
 	CHECK(shim.hub_unlocks == 1, "root-hub lock released after HCD handoff");
 	CHECK(gate_pm_notify(NULL, PM_SUSPEND_PREPARE, NULL) == NOTIFY_BAD,
 	      "suspend rejected while HCD session is live");
+	CHECK(gate_pm_notify(NULL, PM_HIBERNATION_PREPARE, NULL) == NOTIFY_BAD,
+	      "hibernate rejected while HCD session is live");
+	CHECK(gate_pm_notify(NULL, PM_RESTORE_PREPARE, NULL) == NOTIFY_BAD,
+	      "hibernate restore rejected while HCD session is live");
 	gate_hcd_down();
 	gate_finish(hcd_gate_session, 0);
 	kfree(hcd_gate_session);
