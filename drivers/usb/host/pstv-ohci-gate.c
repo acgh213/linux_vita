@@ -15,6 +15,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/reboot.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/suspend.h>
@@ -629,6 +630,39 @@ static struct notifier_block gate_pm_nb = {
 	.notifier_call = gate_pm_notify,
 };
 
+static int gate_reboot_notify(struct notifier_block *nb, unsigned long event,
+			       void *unused)
+{
+	unsigned int sleep_flags;
+
+	if (event != SYS_RESTART && event != SYS_HALT && event != SYS_POWER_OFF)
+		return NOTIFY_DONE;
+	if (!gate_hcd_live())
+		return NOTIFY_OK;
+	sleep_flags = lock_system_sleep();
+	if (!mutex_trylock(&gate_lock)) {
+		unlock_system_sleep(sleep_flags);
+		return NOTIFY_BAD;
+	}
+	if (!hcd_gate_session) {
+		mutex_unlock(&gate_lock);
+		unlock_system_sleep(sleep_flags);
+		return NOTIFY_BAD;
+	}
+	if (gate_hcd_down_trigger()) {
+		mutex_unlock(&gate_lock);
+		unlock_system_sleep(sleep_flags);
+		return NOTIFY_BAD;
+	}
+	mutex_unlock(&gate_lock);
+	unlock_system_sleep(sleep_flags);
+	return NOTIFY_OK;
+}
+
+static struct notifier_block gate_reboot_nb = {
+	.notifier_call = gate_reboot_notify,
+};
+
 static int __init gate_init(void)
 {
 	struct dentry *dir;
@@ -637,8 +671,14 @@ static int __init gate_init(void)
 	ret = register_pm_notifier(&gate_pm_nb);
 	if (ret)
 		return ret;
+	ret = register_reboot_notifier(&gate_reboot_nb);
+	if (ret) {
+		unregister_pm_notifier(&gate_pm_nb);
+		return ret;
+	}
 	dir = debugfs_create_dir("pstv-ohci-gate", NULL);
 	if (IS_ERR(dir)) {
+		unregister_reboot_notifier(&gate_reboot_nb);
 		unregister_pm_notifier(&gate_pm_nb);
 		return PTR_ERR(dir);
 	}

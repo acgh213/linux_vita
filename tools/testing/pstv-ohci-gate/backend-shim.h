@@ -66,6 +66,9 @@ typedef unsigned int gfp_t; typedef int pm_message_t;
 #define PM_SUSPEND_PREPARE 1
 #define PM_HIBERNATION_PREPARE 2
 #define PM_RESTORE_PREPARE 3
+#define SYS_RESTART 1
+#define SYS_HALT 2
+#define SYS_POWER_OFF 3
 #define DEFINE_SHOW_ATTRIBUTE(name) static const struct file_operations name##_fops = { 0 }
 #define container_of(ptr,type,member) ((type *)((char *)(ptr) - offsetof(type, member)))
 #define writel_relaxed(v, addr) writel((v), (addr))
@@ -270,6 +273,8 @@ static inline void atomic_inc(atomic_t *a) { a->counter++; }
 static inline int atomic_read(const atomic_t *a) { return a->counter; }
 static inline unsigned int lock_system_sleep(void) { return 0; }
 static inline void unlock_system_sleep(unsigned int f) { (void)f; }
+static inline int register_reboot_notifier(struct notifier_block *n) { (void)n; return 0; }
+static inline int unregister_reboot_notifier(struct notifier_block *n) { (void)n; return 0; }
 static inline int mutex_trylock(struct mutex *m) { if (m->locked) return 0; m->locked=1; return 1; }
 static inline void mutex_lock(struct mutex *m) { m->locked=1; }
 static inline void mutex_unlock(struct mutex *m) { m->locked=0; }
