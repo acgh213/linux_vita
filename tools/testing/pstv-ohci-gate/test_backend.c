@@ -186,6 +186,16 @@ static void test_hcd_trigger_registers_and_refuses(void)
 	CHECK(shim.hub_unlocks == 1, "root-hub lock released after HCD handoff");
 	CHECK(gate_pm_notify(NULL, PM_SUSPEND_PREPARE, NULL) == NOTIFY_BAD,
 	      "suspend rejected while HCD session is live");
+	gate_hcd_down();
+	gate_finish(hcd_gate_session, 0);
+	kfree(hcd_gate_session);
+	hcd_gate_session = NULL;
+	CHECK(gate_pm_notify(NULL, PM_SUSPEND_PREPARE, NULL) == NOTIFY_OK,
+	      "suspend allowed after HCD teardown");
+	CHECK(shim.pdev.drvdata == &shim.hcd,
+	      "EHCI drvdata survives HCD trigger teardown");
+	CHECK(shim.pm_live == 0 && !shim.pdev.dev.locked && !shim.hub.locked,
+	      "HCD trigger teardown releases gate ownership");
 }
 
 static void test_hcddown_trigger(void)
