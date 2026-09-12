@@ -445,9 +445,21 @@ static ssize_t gamecard_power_store(struct device *dev,
 
 	val = !!val;
 
-	/* Quiesce SDIF1 before touching its rail, mirroring the WLAN path. */
-	if (val)
-		sdhci_vita_suppress_irqs(1);
+	/*
+	 * Quiesce SDIF1 before touching its rail, mirroring the WLAN path.
+	 *
+	 * On power-on the sdhci_vita_reinit_host() below re-enables interrupts.
+	 * On power-off nothing does, which is the intent: the controller stays
+	 * quiet with the rail down instead of taking an interrupt storm as the
+	 * rail collapses.
+	 *
+	 * This does not silence MMC-core polling. Because every SDIF host sets
+	 * SDHCI_QUIRK_BROKEN_CARD_DETECTION, the core treats a card as always
+	 * present and rescans at ~1 Hz, so an enabled-but-unpowered slot logs
+	 * periodic command timeouts until the rail is powered on with a card
+	 * seated. That is the known cost of enabling SDIF1 at all.
+	 */
+	sdhci_vita_suppress_irqs(1);
 
 	ret = syscon->short_command_write(syscon, 0x888, val, 2);
 	if (ret)
