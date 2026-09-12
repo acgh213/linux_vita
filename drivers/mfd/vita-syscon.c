@@ -36,6 +36,12 @@ int __weak sdhci_vita_read_present_state(int bus_index, u32 *state)
 	return -ENODEV;
 }
 
+/* From sdhci-vita.c -- is an SDIF host registered? */
+bool __weak sdhci_vita_host_ready(int bus_index)
+{
+	return false;
+}
+
 /*
  * WiFi (SD8787 "Robin") power control via Ernie syscon commands.
  *
@@ -420,6 +426,56 @@ static ssize_t dolce_usb_power_store(struct device *dev,
 static DEVICE_ATTR_RW(dolce_usb_power);
 
 /*
+ * How long to let the game-card rail settle before touching the bus.
+ *
+ * Empirical. At 50 ms the first command after power-on reliably timed out and
+ * only a later retry enumerated the card, so the rail needs more time than a
+ * bare power write suggests before the card will answer. 250 ms is comfortably
+ * past the observed failure and costs nothing on a boot path.
+ */
+#define VITA_GAMECARD_SETTLE_MS	250
+
+/**
+ * vita_syscon_gamecard_power_on - power the SDIF1 rail and bring the bus up
+ * @syscon: the syscon instance
+ *
+ * Shared by the boot path and the gamecard_power lever so both take the same
+ * route: quiesce the host, raise the rail, let it settle, then reinit and
+ * rescan bus 1 if a host is registered.
+ *
+ * The rail is Ernie syscon 0x888 (ksceSysconCtrlSdPower). Nothing else in the
+ * boot path writes it with data 1, which is why an inserted card is otherwise
+ * unpowered for the whole session.
+ *
+ * Returns 0, or a negative errno from the syscon write.
+ */
+static int vita_syscon_gamecard_power_on(struct vita_syscon *syscon)
+{
+	int ret;
+
+	/* Quiesce before the rail moves, mirroring the WLAN path. */
+	sdhci_vita_suppress_irqs(1);
+
+	ret = syscon->short_command_write(syscon, 0x888, 1, 2);
+	if (ret)
+		return ret;
+
+	msleep(VITA_GAMECARD_SETTLE_MS);
+
+	/*
+	 * Reinit re-enables interrupts and, when bit 16 is set, applies card
+	 * power and the card clock; the rescan then hands the bus to the MMC
+	 * core. Skip both when no host is registered -- the helpers would warn.
+	 */
+	if (sdhci_vita_host_ready(1)) {
+		sdhci_vita_reinit_host(1);
+		sdhci_vita_trigger_rescan(1);
+	}
+
+	return 0;
+}
+
+/*
  * gamecard_power - power the SDIF1 game-card slot rail and rescan bus 1
  *
  * The game-card slot rail is controlled by Ernie syscon command 0x888
@@ -430,9 +486,10 @@ static DEVICE_ATTR_RW(dolce_usb_power);
  * session.
  *
  * Write 1 to power the rail on and re-initialise/rescan SDIF1; write 0 to
- * power it off. This is an explicit, opt-in test lever: nothing calls it at
- * boot, and it is not part of any shipped default configuration. It performs
- * no block-device I/O, so it cannot modify media.
+ * power it off. The lever performs no block-device I/O, so it cannot modify
+ * media. Boards that declare vita,gamecard-power-on-boot take this same
+ * route during probe; boards that do not leave the slot unpowered until
+ * this lever is used.
  *
  * Note that SDHCI_QUIRK_BROKEN_CARD_DETECTION is set for every SDIF host, so
  * the MMC core already assumes a card is present and polls -- card detect is
@@ -452,31 +509,21 @@ static ssize_t gamecard_power_store(struct device *dev,
 
 	val = !!val;
 
-	/*
-	 * Quiesce SDIF1 before touching its rail, mirroring the WLAN path.
-	 *
-	 * On power-on the sdhci_vita_reinit_host() below re-enables interrupts.
-	 * On power-off nothing does, which is the intent: the controller stays
-	 * quiet with the rail down instead of taking an interrupt storm as the
-	 * rail collapses.
-	 *
-	 * This does not silence MMC-core polling. Because every SDIF host sets
-	 * SDHCI_QUIRK_BROKEN_CARD_DETECTION, the core treats a card as always
-	 * present and rescans at ~1 Hz, so an enabled-but-unpowered slot logs
-	 * periodic command timeouts until the rail is powered on with a card
-	 * seated. That is the known cost of enabling SDIF1 at all.
-	 */
-	sdhci_vita_suppress_irqs(1);
-
-	ret = syscon->short_command_write(syscon, 0x888, val, 2);
-	if (ret)
-		return ret;
-
-	msleep(50);
-
 	if (val) {
-		sdhci_vita_reinit_host(1);
-		sdhci_vita_trigger_rescan(1);
+		ret = vita_syscon_gamecard_power_on(syscon);
+		if (ret)
+			return ret;
+	} else {
+		/*
+		 * Quiesce first: nothing re-enables interrupts on this path, so
+		 * the controller stays quiet with the rail down instead of
+		 * taking an interrupt storm as the rail collapses.
+		 */
+		sdhci_vita_suppress_irqs(1);
+
+		ret = syscon->short_command_write(syscon, 0x888, 0, 2);
+		if (ret)
+			return ret;
 	}
 
 	return count;
@@ -921,6 +968,24 @@ static int vita_syscon_probe(struct spi_device *spi)
 		ret = vita_syscon_short_command_write(syscon, 0x80, 2, 3);
 	if (ret < 0) {
 		return ret;
+	}
+
+	/*
+	 * Optionally bring the game-card slot up at boot. Declared only by boards
+	 * whose slot carries an SD2Vita; without it the rail is never raised and
+	 * an inserted card stays unpowered for the session.
+	 *
+	 * The SDIF hosts probe before the syscon on this SoC, so bus 1 is normally
+	 * registered by now and the reinit inside will take effect.
+	 */
+	if (of_property_read_bool(spi->dev.of_node,
+				  "vita,gamecard-power-on-boot")) {
+		ret = vita_syscon_gamecard_power_on(syscon);
+		if (ret)
+			dev_warn(&spi->dev,
+				 "game-card power-on at boot failed: %d\n", ret);
+		else
+			dev_info(&spi->dev, "game-card slot powered on at boot\n");
 	}
 
 	ret = vita_syscon_command_read(syscon, 5, hw_info, sizeof(hw_info));

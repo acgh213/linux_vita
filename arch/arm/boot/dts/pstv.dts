@@ -91,6 +91,11 @@
 	status = "okay";
 };
 
+/* The game-card slot carries an SD2Vita on this unit. */
+&syscon {
+	vita,gamecard-power-on-boot;
+};
+
 /* The PSTV (Dolce) has no touch panel. Probing the syscon touchscreen
  * on it issues Ernie touch commands with no hardware behind them,
  * which wedges the console during boot (observed 2026-08-19, c17).

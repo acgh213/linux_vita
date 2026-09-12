@@ -34,6 +34,7 @@ static struct sdhci_host *vita_sdif_hosts[4];
 void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
 int sdhci_vita_read_present_state(int bus_index, u32 *state);
+bool sdhci_vita_host_ready(int bus_index);
 
 #define PERVASIVE_GATE_BASE	0xE3102000
 #define PERVASIVE_RESET_BASE	0xE3101000
@@ -157,6 +158,24 @@ int sdhci_vita_read_present_state(int bus_index, u32 *state)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sdhci_vita_read_present_state);
+
+/**
+ * sdhci_vita_host_ready - is an SDIF host registered for this bus?
+ * @bus_index: SDIF bus number (0-3)
+ *
+ * Callers that want to reinit or rescan a bus can ask first, instead of
+ * calling the helpers and relying on their no-op path, which warns.
+ *
+ * Returns true if a host is registered.
+ */
+bool sdhci_vita_host_ready(int bus_index)
+{
+	if (bus_index < 0 || bus_index > 3)
+		return false;
+
+	return vita_sdif_hosts[bus_index] != NULL;
+}
+EXPORT_SYMBOL_GPL(sdhci_vita_host_ready);
 
 void sdhci_vita_reinit_host(int bus_index)
 {
