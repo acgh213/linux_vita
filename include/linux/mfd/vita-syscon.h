@@ -61,6 +61,7 @@ struct vita_syscon {
 void sdhci_vita_suppress_irqs(int bus_index);
 void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
+int sdhci_vita_read_present_state(int bus_index, u32 *state);
 
 /* WLAN power helpers -- used by pwrseq-vita-wlan and sysfs */
 int vita_syscon_wlan_power_on(struct vita_syscon *syscon);

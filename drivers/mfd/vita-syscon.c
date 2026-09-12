@@ -29,6 +29,13 @@ void __weak sdhci_vita_trigger_rescan(int bus_index)
 	pr_warn_once("vita-syscon: sdhci_vita_trigger_rescan not available\n");
 }
 
+/* From sdhci-vita.c -- read SDHCI_PRESENT_STATE for SDIF1 diagnosis */
+int __weak sdhci_vita_read_present_state(int bus_index, u32 *state)
+{
+	pr_warn_once("vita-syscon: sdhci_vita_read_present_state not available\n");
+	return -ENODEV;
+}
+
 /*
  * WiFi (SD8787 "Robin") power control via Ernie syscon commands.
  *
@@ -478,8 +485,27 @@ static ssize_t gamecard_power_store(struct device *dev,
 static ssize_t gamecard_power_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
 {
+	u32 state = 0;
+	int ret;
+
+	/*
+	 * Report the card-present bit alongside the help text. It is the
+	 * pivot of the bring-up discriminator table: sdhci_vita_reinit_host()
+	 * only powers the card and enables its clock when this bit is set, so
+	 * it separates "the rail never came up" from "the rail is up and the
+	 * card is still silent". This path is read-only: no state changes.
+	 */
+	ret = sdhci_vita_read_present_state(1, &state);
+	if (ret)
+		return sysfs_emit(buf,
+			"sdif1 host not registered (%d)\n"
+			"write 1 to power the game-card rail and rescan bus 1; 0 to power off\n",
+			ret);
+
 	return sysfs_emit(buf,
-		"write 1 to power the SDIF1 game-card rail and rescan bus 1; 0 to power off\n");
+		"present_state=0x%08x card_present_bit16=%u\n"
+		"write 1 to power the game-card rail and rescan bus 1; 0 to power off\n",
+		state, !!(state & 0x00010000));
 }
 
 static DEVICE_ATTR_RW(gamecard_power);

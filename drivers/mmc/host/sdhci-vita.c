@@ -30,9 +30,10 @@
  */
 static struct sdhci_host *vita_sdif_hosts[4];
 
-/* Exported to vita-syscon for WiFi power sequencing */
+/* Exported to vita-syscon for WiFi power sequencing and SDIF1 diagnosis */
 void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
+int sdhci_vita_read_present_state(int bus_index, u32 *state);
 
 #define PERVASIVE_GATE_BASE	0xE3102000
 #define PERVASIVE_RESET_BASE	0xE3101000
@@ -126,6 +127,36 @@ void sdhci_vita_suppress_irqs(int bus_index)
 	sdhci_writel(host, 0xFFFFFFFF, SDHCI_INT_STATUS);
 }
 EXPORT_SYMBOL_GPL(sdhci_vita_suppress_irqs);
+
+/**
+ * sdhci_vita_read_present_state - read SDHCI_PRESENT_STATE for SDIF1 diagnosis
+ * @bus_index: SDIF bus number (0-3)
+ * @state: receives the raw register value
+ *
+ * Bit 16 (card present) is the pivot of the SDIF1 bring-up discriminator table:
+ * sdhci_vita_reinit_host() gates its whole power/voltage/clock-enable step on
+ * it, so whether that bit ever asserts decides which failure branch we are in.
+ * The running rootfs gives no reliable way to peek a controller register from
+ * userspace (no guaranteed devmem applet, no debugfs node), so expose it here.
+ *
+ * Safe once the host is registered: sdhci_vita_pervasive_init() enables the
+ * SDIF module clock at probe, independently of the card rail state.
+ *
+ * Returns 0, or -ENODEV if no host is registered for that bus.
+ */
+int sdhci_vita_read_present_state(int bus_index, u32 *state)
+{
+	struct sdhci_host *host;
+
+	if (bus_index < 0 || bus_index > 3 || !vita_sdif_hosts[bus_index])
+		return -ENODEV;
+
+	host = vita_sdif_hosts[bus_index];
+	*state = sdhci_readl(host, SDHCI_PRESENT_STATE);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sdhci_vita_read_present_state);
 
 void sdhci_vita_reinit_host(int bus_index)
 {
