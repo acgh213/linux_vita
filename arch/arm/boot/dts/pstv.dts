@@ -62,12 +62,16 @@
  * assumes a card is always present and polls. No non-removable / broken-cd /
  * pwrseq property is needed.
  *
- * The slot power rail (Ernie syscon 0x888, ksceSysconCtrlSdPower) is NOT
- * enabled here: our own reboot notifier powers it off and nothing turns it
- * back on. Use the gamecard_power sysfs attribute to power the rail and
- * rescan bus 1. See docs/plans/2026-09-12-sdif1-gamecard-bringup.md */
+ * The slot rail (Ernie syscon 0x888, ksceSysconCtrlSdPower) is raised by the
+ * driver before the host registers, so the MMC core's first init command
+ * meets a powered card rather than burning sdhci's 10 s software timeout.
+ * Nothing else raises the rail, so without this property a card stays
+ * unpowered for the session. The gamecard_power sysfs attribute remains
+ * available for manual control.
+ * See docs/plans/2026-09-12-sdif1-gamecard-bringup.md */
 &sdif1 {
 	status = "okay";
+	vita,gamecard-power-on-boot;
 };
 
 &sdif2 {
@@ -89,11 +93,6 @@
  */
 &ohci0 {
 	status = "okay";
-};
-
-/* The game-card slot carries an SD2Vita on this unit. */
-&syscon {
-	vita,gamecard-power-on-boot;
 };
 
 /* The PSTV (Dolce) has no touch panel. Probing the syscon touchscreen

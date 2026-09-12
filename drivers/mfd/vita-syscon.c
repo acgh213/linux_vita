@@ -42,6 +42,9 @@ bool __weak sdhci_vita_host_ready(int bus_index)
 	return false;
 }
 
+/* The one syscon instance, so the SDHCI game-card bus can reach it. */
+static struct vita_syscon *vita_syscon_instance;
+
 /*
  * WiFi (SD8787 "Robin") power control via Ernie syscon commands.
  *
@@ -426,18 +429,17 @@ static ssize_t dolce_usb_power_store(struct device *dev,
 static DEVICE_ATTR_RW(dolce_usb_power);
 
 /*
- * How long to let the game-card rail settle before touching the bus.
+ * How long the card may need after the rail rises before it will answer.
  *
- * Empirical and modest. Measurement on PSTV contradicts the guess that a
- * longer settle removes the first-command timeout: at 250 ms the first
- * command after power-on still timed out and the card still enumerated on
- * the retry (power-on 4.19 s, timeout 13.99 s, card up 14.40 s, one timeout
- * that boot). The delay is kept as a sane settling moment before reinit, not
- * as a fix. The real gain came from raising the rail during probe rather
- * than minutes into the session: enumeration moved from 56.6 s to 14.4 s and
- * became unattended.
+ * Deliberately generous, not a measured optimum. The 10 s stall seen on PSTV
+ * was NOT a settle problem: the MMC core issued its first init command about
+ * 200 ms BEFORE the rail came up, got no response, and burned sdhci's flat
+ * software timeout (sdhci.c: "timeout += 10 * HZ"). The fix is ordering --
+ * raise the rail before the host registers -- and this value is set wide so
+ * the first command cannot miss. Tune it down once the split rail/rescan
+ * levers allow the real minimum to be measured.
  */
-#define VITA_GAMECARD_SETTLE_MS	250
+#define VITA_GAMECARD_SETTLE_MS	800
 
 /**
  * vita_syscon_gamecard_power_on - power the SDIF1 rail and bring the bus up
@@ -478,6 +480,31 @@ static int vita_syscon_gamecard_power_on(struct vita_syscon *syscon)
 
 	return 0;
 }
+
+/**
+ * vita_syscon_gamecard_power_on_boot - raise the game-card rail for a boot init
+ *
+ * Called by the SDHCI driver for the game-card bus BEFORE it registers its
+ * host, so the MMC core's first init command meets a powered card. On PSTV
+ * the rail was previously raised from this driver's own probe, which runs
+ * after the SDHCI hosts -- the core got there first, found a dead slot, and
+ * stalled for sdhci's flat 10 s software timeout.
+ *
+ * Returns -EPROBE_DEFER when the syscon has not probed yet. That is what
+ * orders this caller after the syscon, and it is the whole point: the rail
+ * must be up before the first command, not 200 ms after it.
+ *
+ * Returns 0 on success, -EPROBE_DEFER if the syscon is not ready, or a
+ * negative errno from the rail write.
+ */
+int vita_syscon_gamecard_power_on_boot(void)
+{
+	if (!vita_syscon_instance)
+		return -EPROBE_DEFER;
+
+	return vita_syscon_gamecard_power_on(vita_syscon_instance);
+}
+EXPORT_SYMBOL_GPL(vita_syscon_gamecard_power_on_boot);
 
 /*
  * gamecard_power - power the SDIF1 game-card slot rail and rescan bus 1
@@ -947,6 +974,7 @@ static int vita_syscon_probe(struct spi_device *spi)
 	mutex_init(&syscon->dolce_usb_mutex);
 
 	spi_set_drvdata(spi, syscon);
+	vita_syscon_instance = syscon;
 	syscon->dev = &spi->dev;
 	syscon->spi = spi;
 	syscon->transfer = vita_syscon_transfer;
@@ -972,24 +1000,6 @@ static int vita_syscon_probe(struct spi_device *spi)
 		ret = vita_syscon_short_command_write(syscon, 0x80, 2, 3);
 	if (ret < 0) {
 		return ret;
-	}
-
-	/*
-	 * Optionally bring the game-card slot up at boot. Declared only by boards
-	 * whose slot carries an SD2Vita; without it the rail is never raised and
-	 * an inserted card stays unpowered for the session.
-	 *
-	 * The SDIF hosts probe before the syscon on this SoC, so bus 1 is normally
-	 * registered by now and the reinit inside will take effect.
-	 */
-	if (of_property_read_bool(spi->dev.of_node,
-				  "vita,gamecard-power-on-boot")) {
-		ret = vita_syscon_gamecard_power_on(syscon);
-		if (ret)
-			dev_warn(&spi->dev,
-				 "game-card power-on at boot failed: %d\n", ret);
-		else
-			dev_info(&spi->dev, "game-card slot powered on at boot\n");
 	}
 
 	ret = vita_syscon_command_read(syscon, 5, hw_info, sizeof(hw_info));

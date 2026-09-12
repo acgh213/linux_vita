@@ -36,6 +36,14 @@ void sdhci_vita_trigger_rescan(int bus_index);
 int sdhci_vita_read_present_state(int bus_index, u32 *state);
 bool sdhci_vita_host_ready(int bus_index);
 
+/* From vita-syscon.c -- raise the game-card rail before the host registers */
+int vita_syscon_gamecard_power_on_boot(void);
+
+int __weak vita_syscon_gamecard_power_on_boot(void)
+{
+	return -ENODEV;
+}
+
 #define PERVASIVE_GATE_BASE	0xE3102000
 #define PERVASIVE_RESET_BASE	0xE3101000
 #define PERVASIVE_MISC_BASE	0xE3100000
@@ -490,6 +498,28 @@ static int sdhci_vita_probe(struct platform_device *pdev)
 	if (bus_index > 3) {
 		dev_err(&pdev->dev, "invalid bus-index %u\n", bus_index);
 		return -EINVAL;
+	}
+
+	/*
+	 * Raise the game-card rail before anything else, so the initialisation
+	 * the MMC core performs after sdhci_add_host() meets a powered card.
+	 * Previously the rail came up from the syscon driver's probe, which runs
+	 * after this probe: the core's first command went out against a dead slot
+	 * and burned sdhci's flat 10 s software timeout before the retry worked.
+	 *
+	 * -EPROBE_DEFER means the syscon is not probed yet; returning it orders
+	 * this probe after the syscon, which is exactly the dependency we need.
+	 */
+	if (of_property_read_bool(pdev->dev.of_node,
+				  "vita,gamecard-power-on-boot")) {
+		ret = vita_syscon_gamecard_power_on_boot();
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		if (ret)
+			dev_warn(&pdev->dev,
+				 "game-card rail on at boot failed: %d\n", ret);
+		else
+			dev_info(&pdev->dev, "game-card rail raised before init\n");
 	}
 
 	/* Enable clock and deassert reset before touching SDHCI registers */

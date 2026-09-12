@@ -63,6 +63,7 @@ void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
 int sdhci_vita_read_present_state(int bus_index, u32 *state);
 bool sdhci_vita_host_ready(int bus_index);
+int vita_syscon_gamecard_power_on_boot(void);
 
 /* WLAN power helpers -- used by pwrseq-vita-wlan and sysfs */
 int vita_syscon_wlan_power_on(struct vita_syscon *syscon);
