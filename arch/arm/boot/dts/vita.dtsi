@@ -347,7 +347,9 @@
 		 * external-aborts and poisons the whole bus page until the
 		 * next power cycle (one-way).  Do not add ohci-platform
 		 * nodes for these buses until that decode gate is
-		 * understood.
+		 * understood.  The PSTV production OHCI node below stays
+		 * disabled until reboot/VBUS shutdown ordering is reviewed
+		 * and the driver is validated on hardware.
 		 *
 		 * Pervasive wiring per bus: gate 0xE3102090/94/98 (clock
 		 * ids 0/1/2, mask 0xF) and reset index 36/37/38 (mask 0xF).
@@ -364,6 +366,19 @@
 			interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&pervasive_clk VITA_PCLK_USB0>;
 			resets = <&reset ((0xf << 16) | 36)>;
+			status = "disabled";
+		};
+
+		/*
+		 * Bus-zero full/low-speed companion inside the ehci0 page.
+		 * Its driver refuses to read this window until ehci0 is
+		 * bound, running and advancing frames.
+		 */
+		ohci0: ohci@e40e0200 {
+			compatible = "vita,pstv-ohci";
+			reg = <0xe40e0200 0x100>;
+			interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
+			vita,ehci = <&ehci0>;
 			status = "disabled";
 		};
 

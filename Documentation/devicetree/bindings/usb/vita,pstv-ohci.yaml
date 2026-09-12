@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/vita,pstv-ohci.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: PlayStation TV native OHCI companion controller
+
+maintainers:
+  - Vita Linux maintainers <linux-vita@lists.example.org>
+
+description: |
+  The PlayStation TV has a native OHCI 1.0 full-/low-speed companion
+  controller alongside its EHCI controller.  The companion is linked to the
+  already-running EHCI host through vita,ehci.  The production driver uses
+  the address and interrupt supplied by firmware and performs an identity
+  check against the known PSTV hardware values.
+
+properties:
+  compatible:
+    const: vita,pstv-ohci
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  vita,ehci:
+    description: Phandle to the paired EHCI host controller.
+    $ref: /schemas/types.yaml#/definitions/phandle
+
+  status: true
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - vita,ehci
+
+additionalProperties: false
+
+examples:
+  - |
+    ohci0: ohci@e40e0200 {
+        compatible = "vita,pstv-ohci";
+        reg = <0xe40e0200 0x100>;
+        interrupts = <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
+        vita,ehci = <&ehci0>;
+        status = "disabled";
+    };

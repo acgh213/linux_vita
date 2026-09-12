@@ -4,10 +4,29 @@
 #
 comment "USB Host Controller Drivers"
 
+config USB_PSTV_OHCI
+	bool "PSTV native OHCI companion host controller"
+	depends on ARCH_VITA && USB=y && USB_EHCI_HCD_PLATFORM=y && USB_OHCI_HCD=y
+	depends on PM && OF_IRQ && HAS_DMA
+	help
+	  Built-in production OHCI companion host controller for the PSTV
+	  external Type-A port, providing full- and low-speed devices such
+	  as keyboards alongside the EHCI controller on the same bus.
+
+	  The companion register window only decodes once the paired EHCI
+	  core is running, so the driver defers until that is proven.
+
+	  The device-tree node stays disabled until shutdown ordering and
+	  controlled hardware validation are complete. Say N unless you are
+	  building a validation image.
+
 config USB_PSTV_OHCI_GATE
 	bool "PSTV post-boot OHCI diagnostic gate (EXPERIMENTAL)"
+	depends on !USB_PSTV_OHCI
 	depends on ARCH_VITA && USB=y && USB_EHCI_HCD_PLATFORM=y && USB_OHCI_HCD=y
 	depends on DEBUG_FS && PM && OF_IRQ && HAS_DMA
+	default n
+	# Diagnostic gate and production HCD are mutually exclusive.
 	help
 	  Manual root-only read/reset/first-frame diagnostics of the PSTV
 	  bus-zero OHCI companion after EHCI has booted. No hardware access
