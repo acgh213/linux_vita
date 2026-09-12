@@ -101,11 +101,17 @@
 		};
 	};
 
-	refclk144mhz: refclk144mhz {
+	/*
+	 * Firmware leaves BaseClk at selector 7, divisor 0 (333 MHz nominal).
+	 * The A9 private timers run at CPU/2. Account for the inherited 1%
+	 * downspread's mean rate: 333000000 * 0.995 / 2 = 165667500 Hz.
+	 * This describes the fixed boot configuration, not a programmable PLL.
+	 */
+	periphclk: periphclk {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <144000000>;
-		clock-output-names = "refclk144mhz";
+		clock-frequency = <165667500>;
+		clock-output-names = "periphclk";
 	};
 
 	soc {
@@ -202,14 +208,14 @@
 			compatible = "arm,cortex-a9-global-timer";
 			reg = <0x1a000200 0x100>;
 			interrupts = <GIC_PPI 11 (GIC_CPU_MASK_RAW(0xF) | IRQ_TYPE_EDGE_RISING)>;
-			clocks = <&refclk144mhz>;
+			clocks = <&periphclk>;
 		};
 
 		local_timer@1a000600 {
 			compatible = "arm,cortex-a9-twd-timer";
 			reg = <0x1a000600 0x100>;
 			interrupts = <GIC_PPI 13 (GIC_CPU_MASK_RAW(0xF) | IRQ_TYPE_EDGE_RISING)>;
-			clocks = <&refclk144mhz>;
+			clocks = <&periphclk>;
 		};
 
 		gpio0: gpio@e20a0000 {
