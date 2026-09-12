@@ -274,10 +274,17 @@ static int pstv_ohci_probe(struct platform_device *pdev)
 	 * Make the dependency real before anything else: the driver core now
 	 * unbinds this driver ahead of the EHCI one, so the references taken
 	 * above cannot outlive their supplier.
+	 *
+	 * The link is ordering-only.  ehci-platform never enables runtime PM
+	 * on its platform device, so it reports "unsupported" and asking for
+	 * DL_FLAG_PM_RUNTIME | DL_FLAG_RPM_ACTIVE makes device_link_add()
+	 * fail its internal pm_runtime_get_sync() with -EACCES and return
+	 * NULL (observed on hardware 2026-09-11).  What actually has to stay
+	 * powered is the EHCI *root hub*, and that is held below with its own
+	 * runtime-PM reference.
 	 */
 	if (!device_link_add(dev, &ehci_pdev->dev,
-			     DL_FLAG_AUTOREMOVE_CONSUMER |
-			     DL_FLAG_PM_RUNTIME | DL_FLAG_RPM_ACTIVE)) {
+			     DL_FLAG_AUTOREMOVE_CONSUMER)) {
 		ret = dev_err_probe(dev, -EINVAL, "no device link to EHCI\n");
 		goto put_ehci;
 	}

@@ -43,8 +43,10 @@ REQUIRED = [
      r"FRINDEX"),
     ("creates a managed device link to the EHCI supplier",
      r"device_link_add\s*\(\s*dev\s*,\s*&ehci_pdev->dev"),
-    ("marks that link autoremove + runtime PM",
-     r"DL_FLAG_AUTOREMOVE_CONSUMER\s*\|\s*\n?\s*DL_FLAG_PM_RUNTIME"),
+    ("marks that link autoremove",
+     r"DL_FLAG_AUTOREMOVE_CONSUMER"),
+    ("holds the EHCI root hub with runtime PM",
+     r"pm_runtime_resume_and_get\s*\(\s*&ehci_rh->dev"),
     ("publishes the EHCI companion relationship",
      r"hs_companion\s*=\s*&\w+->self"),
     ("clears the companion relationship on teardown",
@@ -64,6 +66,13 @@ REQUIRED = [
 
 # (description, pattern) - none may appear in the driver.
 FORBIDDEN = [
+    # ehci-platform reports runtime_status=unsupported, so requesting
+    # RPM_ACTIVE makes device_link_add()'s internal pm_runtime_get_sync()
+    # fail with -EACCES and return NULL, so probe dies with -EINVAL before
+    # touching hardware. Observed on hardware 2026-09-11. The root hub, not
+    # the platform device, carries the runtime-PM hold.
+    ("asks the EHCI platform device for runtime PM it does not support",
+     r"^(?!\s*[*/]).*DL_FLAG_RPM_ACTIVE"),
     ("shares HCD state with the EHCI controller",
      r"usb_create_shared_hcd"),
     ("overwrites the EHCI device's drvdata",
@@ -86,10 +95,10 @@ FORBIDDEN = [
 def check(source):
     failures = []
     for description, pattern in REQUIRED:
-        if not re.search(pattern, source):
+        if not re.search(pattern, source, re.MULTILINE):
             failures.append("missing: driver never " + description)
     for description, pattern in FORBIDDEN:
-        match = re.search(pattern, source)
+        match = re.search(pattern, source, re.MULTILINE)
         if match:
             failures.append("forbidden: driver %s (%r)"
                             % (description, match.group(0)))
