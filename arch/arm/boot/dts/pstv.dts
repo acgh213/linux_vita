@@ -54,8 +54,21 @@
 	status = "okay";
 };
 
-/* SDIF1 (game card) and SDIF3 (microSD/SD2Vita) disabled --
- * no cards present, and polling creates log spam */
+/* SDIF3 (microSD) disabled -- no card present, and polling creates log spam.
+ *
+ * SDIF1 (game card) is enabled for SD2Vita bring-up. Note that presence
+ * detection is already bypassed: sdhci-vita sets
+ * SDHCI_QUIRK_BROKEN_CARD_DETECTION for every SDIF host, so the MMC core
+ * assumes a card is always present and polls. No non-removable / broken-cd /
+ * pwrseq property is needed.
+ *
+ * The slot power rail (Ernie syscon 0x888, ksceSysconCtrlSdPower) is NOT
+ * enabled here: our own reboot notifier powers it off and nothing turns it
+ * back on. Use the gamecard_power sysfs attribute to power the rail and
+ * rescan bus 1. See docs/plans/2026-09-12-sdif1-gamecard-bringup.md */
+&sdif1 {
+	status = "okay";
+};
 
 &sdif2 {
 	status = "okay";

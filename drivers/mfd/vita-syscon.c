@@ -412,9 +412,70 @@ static ssize_t dolce_usb_power_store(struct device *dev,
 
 static DEVICE_ATTR_RW(dolce_usb_power);
 
+/*
+ * gamecard_power - power the SDIF1 game-card slot rail and rescan bus 1
+ *
+ * The game-card slot rail is controlled by Ernie syscon command 0x888
+ * (ksceSysconCtrlSdPower; provenance: syscon.skprx.elf disassembly, see
+ * lab/battery-re/POWER-SYSCON-TELEMETRY-CHECKPOINT-2026-08-30.md). Our own
+ * reboot notifier powers it off with data 0, and nothing in the normal boot
+ * path turns it back on, so an inserted card is unpowered for the whole
+ * session.
+ *
+ * Write 1 to power the rail on and re-initialise/rescan SDIF1; write 0 to
+ * power it off. This is an explicit, opt-in test lever: nothing calls it at
+ * boot, and it is not part of any shipped default configuration. It performs
+ * no block-device I/O, so it cannot modify media.
+ *
+ * Note that SDHCI_QUIRK_BROKEN_CARD_DETECTION is set for every SDIF host, so
+ * the MMC core already assumes a card is present and polls -- card detect is
+ * not what gates initialisation here.
+ */
+static ssize_t gamecard_power_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	unsigned int val;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	val = !!val;
+
+	/* Quiesce SDIF1 before touching its rail, mirroring the WLAN path. */
+	if (val)
+		sdhci_vita_suppress_irqs(1);
+
+	ret = syscon->short_command_write(syscon, 0x888, val, 2);
+	if (ret)
+		return ret;
+
+	msleep(50);
+
+	if (val) {
+		sdhci_vita_reinit_host(1);
+		sdhci_vita_trigger_rescan(1);
+	}
+
+	return count;
+}
+
+static ssize_t gamecard_power_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf,
+		"write 1 to power the SDIF1 game-card rail and rescan bus 1; 0 to power off\n");
+}
+
+static DEVICE_ATTR_RW(gamecard_power);
+
 static struct attribute *vita_syscon_attrs[] = {
 	&dev_attr_wlan_power.attr,
 	&dev_attr_dolce_usb_power.attr,
+	&dev_attr_gamecard_power.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vita_syscon);
