@@ -428,10 +428,14 @@ static DEVICE_ATTR_RW(dolce_usb_power);
 /*
  * How long to let the game-card rail settle before touching the bus.
  *
- * Empirical. At 50 ms the first command after power-on reliably timed out and
- * only a later retry enumerated the card, so the rail needs more time than a
- * bare power write suggests before the card will answer. 250 ms is comfortably
- * past the observed failure and costs nothing on a boot path.
+ * Empirical and modest. Measurement on PSTV contradicts the guess that a
+ * longer settle removes the first-command timeout: at 250 ms the first
+ * command after power-on still timed out and the card still enumerated on
+ * the retry (power-on 4.19 s, timeout 13.99 s, card up 14.40 s, one timeout
+ * that boot). The delay is kept as a sane settling moment before reinit, not
+ * as a fix. The real gain came from raising the rail during probe rather
+ * than minutes into the session: enumeration moved from 56.6 s to 14.4 s and
+ * became unattended.
  */
 #define VITA_GAMECARD_SETTLE_MS	250
 
