@@ -499,10 +499,12 @@ static int vita_syscon_gamecard_power_on(struct vita_syscon *syscon)
  */
 int vita_syscon_gamecard_power_on_boot(void)
 {
-	if (!vita_syscon_instance)
+	struct vita_syscon *syscon = READ_ONCE(vita_syscon_instance);
+
+	if (!syscon)
 		return -EPROBE_DEFER;
 
-	return vita_syscon_gamecard_power_on(vita_syscon_instance);
+	return vita_syscon_gamecard_power_on(syscon);
 }
 EXPORT_SYMBOL_GPL(vita_syscon_gamecard_power_on_boot);
 
@@ -974,7 +976,6 @@ static int vita_syscon_probe(struct spi_device *spi)
 	mutex_init(&syscon->dolce_usb_mutex);
 
 	spi_set_drvdata(spi, syscon);
-	vita_syscon_instance = syscon;
 	syscon->dev = &spi->dev;
 	syscon->spi = spi;
 	syscon->transfer = vita_syscon_transfer;
@@ -1053,9 +1054,13 @@ static int vita_syscon_probe(struct spi_device *spi)
 	if (ret)
 		dev_warn(&spi->dev, "failed to register reboot notifier: %d\n", ret);
 
-	return devm_mfd_add_devices(syscon->dev, PLATFORM_DEVID_NONE,
-				    vita_syscon_devs, ARRAY_SIZE(vita_syscon_devs),
-				    NULL, 0, NULL);
+	ret = devm_mfd_add_devices(syscon->dev, PLATFORM_DEVID_NONE,
+				   vita_syscon_devs, ARRAY_SIZE(vita_syscon_devs),
+				   NULL, 0, NULL);
+	if (!ret)
+		WRITE_ONCE(vita_syscon_instance, syscon);
+
+	return ret;
 }
 
 static const struct of_device_id vita_syscon_of_match[] = {
