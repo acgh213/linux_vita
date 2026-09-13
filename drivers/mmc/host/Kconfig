@@ -321,6 +321,7 @@ config MMC_SDHCI_VITA
 	tristate "SDHCI support on PlayStation Vita (SDIF)"
 	depends on ARCH_VITA || COMPILE_TEST
 	depends on MMC_SDHCI
+	depends on MFD_VITA_SYSCON
 	help
 	  This selects the SDHCI controller (SDIF) on the PlayStation Vita.
 	  The Vita has 4 SDIF hosts: eMMC, game card, WLAN/BT, and microSD.

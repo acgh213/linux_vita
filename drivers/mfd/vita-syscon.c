@@ -548,15 +548,14 @@ static ssize_t gamecard_power_store(struct device *dev,
 			return ret;
 	} else {
 		/*
-		 * Quiesce first: nothing re-enables interrupts on this path, so
-		 * the controller stays quiet with the rail down instead of
-		 * taking an interrupt storm as the rail collapses.
+		 * SDIF1 is polling-capable and can back a mounted persistent
+		 * filesystem. Masking IRQs alone neither drains requests nor stops
+		 * card detection, so cutting the rail here can corrupt active media.
+		 * A rail-off/rescan lifecycle needs explicit MMC-core coordination.
 		 */
-		sdhci_vita_suppress_irqs(1);
-
-		ret = syscon->short_command_write(syscon, 0x888, 0, 2);
-		if (ret)
-			return ret;
+		dev_warn(syscon->dev,
+			 "refusing to power down SDIF1 without host quiesce\n");
+		return -EBUSY;
 	}
 
 	return count;
