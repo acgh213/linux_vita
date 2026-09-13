@@ -509,17 +509,18 @@ static int sdhci_vita_probe(struct platform_device *pdev)
 	 *
 	 * -EPROBE_DEFER means the syscon is not probed yet; returning it orders
 	 * this probe after the syscon, which is exactly the dependency we need.
+	 * Any other failure is also fatal: registering the host with the rail down
+	 * repeats the unpowered first-command timeout this ordering fixes.
 	 */
 	if (of_property_read_bool(pdev->dev.of_node,
 				  "vita,gamecard-power-on-boot")) {
 		ret = vita_syscon_gamecard_power_on_boot();
-		if (ret == -EPROBE_DEFER)
+		if (ret) {
+			dev_err(&pdev->dev,
+				"game-card rail on at boot failed: %d\n", ret);
 			return ret;
-		if (ret)
-			dev_warn(&pdev->dev,
-				 "game-card rail on at boot failed: %d\n", ret);
-		else
-			dev_info(&pdev->dev, "game-card rail raised before init\n");
+		}
+		dev_info(&pdev->dev, "game-card rail raised before init\n");
 	}
 
 	/* Enable clock and deassert reset before touching SDHCI registers */
