@@ -29,6 +29,22 @@ void __weak sdhci_vita_trigger_rescan(int bus_index)
 	pr_warn_once("vita-syscon: sdhci_vita_trigger_rescan not available\n");
 }
 
+/* From sdhci-vita.c -- read SDHCI_PRESENT_STATE for SDIF1 diagnosis */
+int __weak sdhci_vita_read_present_state(int bus_index, u32 *state)
+{
+	pr_warn_once("vita-syscon: sdhci_vita_read_present_state not available\n");
+	return -ENODEV;
+}
+
+/* From sdhci-vita.c -- is an SDIF host registered? */
+bool __weak sdhci_vita_host_ready(int bus_index)
+{
+	return false;
+}
+
+/* The one syscon instance, so the SDHCI game-card bus can reach it. */
+static struct vita_syscon *vita_syscon_instance;
+
 /*
  * WiFi (SD8787 "Robin") power control via Ernie syscon commands.
  *
@@ -412,9 +428,172 @@ static ssize_t dolce_usb_power_store(struct device *dev,
 
 static DEVICE_ATTR_RW(dolce_usb_power);
 
+/*
+ * How long the card may need after the rail rises before it will answer.
+ *
+ * Deliberately generous, not a measured optimum. The 10 s stall seen on PSTV
+ * was NOT a settle problem: the MMC core issued its first init command about
+ * 200 ms BEFORE the rail came up, got no response, and burned sdhci's flat
+ * software timeout (sdhci.c: "timeout += 10 * HZ"). The fix is ordering --
+ * raise the rail before the host registers -- and this value is set wide so
+ * the first command cannot miss. Tune it down once the split rail/rescan
+ * levers allow the real minimum to be measured.
+ */
+#define VITA_GAMECARD_SETTLE_MS	800
+
+/**
+ * vita_syscon_gamecard_power_on - power the SDIF1 rail and bring the bus up
+ * @syscon: the syscon instance
+ *
+ * Shared by the boot path and the gamecard_power lever so both take the same
+ * route: quiesce the host, raise the rail, let it settle, then reinit and
+ * rescan bus 1 if a host is registered.
+ *
+ * The rail is Ernie syscon 0x888 (ksceSysconCtrlSdPower). Nothing else in the
+ * boot path writes it with data 1, which is why an inserted card is otherwise
+ * unpowered for the whole session.
+ *
+ * Returns 0, or a negative errno from the syscon write.
+ */
+static int vita_syscon_gamecard_power_on(struct vita_syscon *syscon)
+{
+	int ret;
+
+	/* Quiesce before the rail moves, mirroring the WLAN path. */
+	sdhci_vita_suppress_irqs(1);
+
+	ret = syscon->short_command_write(syscon, 0x888, 1, 2);
+	if (ret)
+		return ret;
+
+	msleep(VITA_GAMECARD_SETTLE_MS);
+
+	/*
+	 * Reinit re-enables interrupts and, when bit 16 is set, applies card
+	 * power and the card clock; the rescan then hands the bus to the MMC
+	 * core. Skip both when no host is registered -- the helpers would warn.
+	 */
+	if (sdhci_vita_host_ready(1)) {
+		sdhci_vita_reinit_host(1);
+		sdhci_vita_trigger_rescan(1);
+	}
+
+	return 0;
+}
+
+/**
+ * vita_syscon_gamecard_power_on_boot - raise the game-card rail for a boot init
+ *
+ * Called by the SDHCI driver for the game-card bus BEFORE it registers its
+ * host, so the MMC core's first init command meets a powered card. On PSTV
+ * the rail was previously raised from this driver's own probe, which runs
+ * after the SDHCI hosts -- the core got there first, found a dead slot, and
+ * stalled for sdhci's flat 10 s software timeout.
+ *
+ * Returns -EPROBE_DEFER when the syscon has not probed yet. That is what
+ * orders this caller after the syscon, and it is the whole point: the rail
+ * must be up before the first command, not 200 ms after it.
+ *
+ * Returns 0 on success, -EPROBE_DEFER if the syscon is not ready, or a
+ * negative errno from the rail write.
+ */
+int vita_syscon_gamecard_power_on_boot(void)
+{
+	struct vita_syscon *syscon = READ_ONCE(vita_syscon_instance);
+
+	if (!syscon)
+		return -EPROBE_DEFER;
+
+	return vita_syscon_gamecard_power_on(syscon);
+}
+EXPORT_SYMBOL_GPL(vita_syscon_gamecard_power_on_boot);
+
+/*
+ * gamecard_power - power the SDIF1 game-card slot rail and rescan bus 1
+ *
+ * The game-card slot rail is controlled by Ernie syscon command 0x888
+ * (ksceSysconCtrlSdPower; provenance: syscon.skprx.elf disassembly, see
+ * lab/battery-re/POWER-SYSCON-TELEMETRY-CHECKPOINT-2026-08-30.md). Our own
+ * reboot notifier powers it off with data 0, and nothing in the normal boot
+ * path turns it back on, so an inserted card is unpowered for the whole
+ * session.
+ *
+ * Write 1 to power the rail on and re-initialise/rescan SDIF1; write 0 to
+ * power it off. The lever performs no block-device I/O, so it cannot modify
+ * media. Boards that declare vita,gamecard-power-on-boot take this same
+ * route during probe; boards that do not leave the slot unpowered until
+ * this lever is used.
+ *
+ * Note that SDHCI_QUIRK_BROKEN_CARD_DETECTION is set for every SDIF host, so
+ * the MMC core already assumes a card is present and polls -- card detect is
+ * not what gates initialisation here.
+ */
+static ssize_t gamecard_power_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct vita_syscon *syscon = dev_get_drvdata(dev);
+	unsigned int val;
+	int ret;
+
+	ret = kstrtouint(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	val = !!val;
+
+	if (val) {
+		ret = vita_syscon_gamecard_power_on(syscon);
+		if (ret)
+			return ret;
+	} else {
+		/*
+		 * Quiesce first: nothing re-enables interrupts on this path, so
+		 * the controller stays quiet with the rail down instead of
+		 * taking an interrupt storm as the rail collapses.
+		 */
+		sdhci_vita_suppress_irqs(1);
+
+		ret = syscon->short_command_write(syscon, 0x888, 0, 2);
+		if (ret)
+			return ret;
+	}
+
+	return count;
+}
+
+static ssize_t gamecard_power_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	u32 state = 0;
+	int ret;
+
+	/*
+	 * Report the card-present bit alongside the help text. It is the
+	 * pivot of the bring-up discriminator table: sdhci_vita_reinit_host()
+	 * only powers the card and enables its clock when this bit is set, so
+	 * it separates "the rail never came up" from "the rail is up and the
+	 * card is still silent". This path is read-only: no state changes.
+	 */
+	ret = sdhci_vita_read_present_state(1, &state);
+	if (ret)
+		return sysfs_emit(buf,
+			"sdif1 host not registered (%d)\n"
+			"write 1 to power the game-card rail and rescan bus 1; 0 to power off\n",
+			ret);
+
+	return sysfs_emit(buf,
+		"present_state=0x%08x card_present_bit16=%u\n"
+		"write 1 to power the game-card rail and rescan bus 1; 0 to power off\n",
+		state, !!(state & 0x00010000));
+}
+
+static DEVICE_ATTR_RW(gamecard_power);
+
 static struct attribute *vita_syscon_attrs[] = {
 	&dev_attr_wlan_power.attr,
 	&dev_attr_dolce_usb_power.attr,
+	&dev_attr_gamecard_power.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(vita_syscon);
@@ -875,9 +1054,13 @@ static int vita_syscon_probe(struct spi_device *spi)
 	if (ret)
 		dev_warn(&spi->dev, "failed to register reboot notifier: %d\n", ret);
 
-	return devm_mfd_add_devices(syscon->dev, PLATFORM_DEVID_NONE,
-				    vita_syscon_devs, ARRAY_SIZE(vita_syscon_devs),
-				    NULL, 0, NULL);
+	ret = devm_mfd_add_devices(syscon->dev, PLATFORM_DEVID_NONE,
+				   vita_syscon_devs, ARRAY_SIZE(vita_syscon_devs),
+				   NULL, 0, NULL);
+	if (!ret)
+		WRITE_ONCE(vita_syscon_instance, syscon);
+
+	return ret;
 }
 
 static const struct of_device_id vita_syscon_of_match[] = {

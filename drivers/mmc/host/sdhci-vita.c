@@ -30,9 +30,19 @@
  */
 static struct sdhci_host *vita_sdif_hosts[4];
 
-/* Exported to vita-syscon for WiFi power sequencing */
+/* Exported to vita-syscon for WiFi power sequencing and SDIF1 diagnosis */
 void sdhci_vita_reinit_host(int bus_index);
 void sdhci_vita_trigger_rescan(int bus_index);
+int sdhci_vita_read_present_state(int bus_index, u32 *state);
+bool sdhci_vita_host_ready(int bus_index);
+
+/* From vita-syscon.c -- raise the game-card rail before the host registers */
+int vita_syscon_gamecard_power_on_boot(void);
+
+int __weak vita_syscon_gamecard_power_on_boot(void)
+{
+	return -ENODEV;
+}
 
 #define PERVASIVE_GATE_BASE	0xE3102000
 #define PERVASIVE_RESET_BASE	0xE3101000
@@ -126,6 +136,54 @@ void sdhci_vita_suppress_irqs(int bus_index)
 	sdhci_writel(host, 0xFFFFFFFF, SDHCI_INT_STATUS);
 }
 EXPORT_SYMBOL_GPL(sdhci_vita_suppress_irqs);
+
+/**
+ * sdhci_vita_read_present_state - read SDHCI_PRESENT_STATE for SDIF1 diagnosis
+ * @bus_index: SDIF bus number (0-3)
+ * @state: receives the raw register value
+ *
+ * Bit 16 (card present) is the pivot of the SDIF1 bring-up discriminator table:
+ * sdhci_vita_reinit_host() gates its whole power/voltage/clock-enable step on
+ * it, so whether that bit ever asserts decides which failure branch we are in.
+ * The running rootfs gives no reliable way to peek a controller register from
+ * userspace (no guaranteed devmem applet, no debugfs node), so expose it here.
+ *
+ * Safe once the host is registered: sdhci_vita_pervasive_init() enables the
+ * SDIF module clock at probe, independently of the card rail state.
+ *
+ * Returns 0, or -ENODEV if no host is registered for that bus.
+ */
+int sdhci_vita_read_present_state(int bus_index, u32 *state)
+{
+	struct sdhci_host *host;
+
+	if (bus_index < 0 || bus_index > 3 || !vita_sdif_hosts[bus_index])
+		return -ENODEV;
+
+	host = vita_sdif_hosts[bus_index];
+	*state = sdhci_readl(host, SDHCI_PRESENT_STATE);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sdhci_vita_read_present_state);
+
+/**
+ * sdhci_vita_host_ready - is an SDIF host registered for this bus?
+ * @bus_index: SDIF bus number (0-3)
+ *
+ * Callers that want to reinit or rescan a bus can ask first, instead of
+ * calling the helpers and relying on their no-op path, which warns.
+ *
+ * Returns true if a host is registered.
+ */
+bool sdhci_vita_host_ready(int bus_index)
+{
+	if (bus_index < 0 || bus_index > 3)
+		return false;
+
+	return vita_sdif_hosts[bus_index] != NULL;
+}
+EXPORT_SYMBOL_GPL(sdhci_vita_host_ready);
 
 void sdhci_vita_reinit_host(int bus_index)
 {
@@ -440,6 +498,28 @@ static int sdhci_vita_probe(struct platform_device *pdev)
 	if (bus_index > 3) {
 		dev_err(&pdev->dev, "invalid bus-index %u\n", bus_index);
 		return -EINVAL;
+	}
+
+	/*
+	 * Raise the game-card rail before anything else, so the initialisation
+	 * the MMC core performs after sdhci_add_host() meets a powered card.
+	 * Previously the rail came up from the syscon driver's probe, which runs
+	 * after this probe: the core's first command went out against a dead slot
+	 * and burned sdhci's flat 10 s software timeout before the retry worked.
+	 *
+	 * -EPROBE_DEFER means the syscon is not probed yet; returning it orders
+	 * this probe after the syscon, which is exactly the dependency we need.
+	 */
+	if (of_property_read_bool(pdev->dev.of_node,
+				  "vita,gamecard-power-on-boot")) {
+		ret = vita_syscon_gamecard_power_on_boot();
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		if (ret)
+			dev_warn(&pdev->dev,
+				 "game-card rail on at boot failed: %d\n", ret);
+		else
+			dev_info(&pdev->dev, "game-card rail raised before init\n");
 	}
 
 	/* Enable clock and deassert reset before touching SDHCI registers */
