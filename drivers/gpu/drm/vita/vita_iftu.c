@@ -181,6 +181,16 @@ struct vita_iftu_device {
 
 	/* Bounded callback trace for the supervised first-commit test. */
 	atomic_t trace_count;
+
+	/* M3-B1: the selector is switched in the vblank ISR, not in
+	 * atomic_update(). The commit path runs in atomic context and must not
+	 * sleep, while the frame boundary is exactly where the switch has to
+	 * land. atomic_update() blits into the inactive buffer and marks a
+	 * flip pending; the ISR writes the selector and the DRM event is armed
+	 * on the same frame the switch happens.
+	 */
+	unsigned int live_cfg;
+	atomic_t flip_pending;
 };
 
 static struct vita_iftu_device *vita_iftu_device_of_dev(struct drm_device *dev)
@@ -319,6 +329,9 @@ static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane
 	struct drm_atomic_helper_damage_iter iter;
 	struct drm_rect damage;
 	unsigned int trace_seq;
+	unsigned int back_cfg = idev->live_cfg ^ 1u;
+	size_t back_offset = (size_t)back_cfg * idev->pitch * idev->mode.vdisplay;
+	bool blitted = false;
 	int ret, idx;
 
 	if (vita_iftu_trace_take(idev, &trace_seq))
@@ -356,14 +369,24 @@ static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane
 		if (!drm_rect_intersect(&dst_clip, &damage))
 			continue;
 
-		iosys_map_incr(&dst, drm_fb_clip_offset(idev->pitch, idev->format, &dst_clip));
+		iosys_map_incr(&dst, back_offset +
+			       drm_fb_clip_offset(idev->pitch, idev->format, &dst_clip));
 		ret = drm_fb_blit(&dst, &idev->pitch, idev->format->format,
 				  shadow_plane_state->data, fb, &damage,
 				  &shadow_plane_state->fmtcnv_state);
+		blitted = true;
 		if (vita_iftu_trace_take(idev, &trace_seq))
 			drm_dbg(dev, "vita-iftu trace[%u] damage=%d,%d-%d,%d blit_ret=%d\n",
 				 trace_seq, damage.x1, damage.y1, damage.x2, damage.y2, ret);
 	}
+
+	/*
+	 * Only arm a flip if pixels actually landed in the back buffer. A
+	 * commit with no damage must not switch the selector, or it would
+	 * present a stale buffer as if it were new.
+	 */
+	if (blitted)
+		atomic_set(&idev->flip_pending, 1);
 
 	drm_dev_exit(idx);
 out_end_cpu_access:
@@ -383,6 +406,9 @@ static void vita_iftu_primary_plane_helper_atomic_disable(struct drm_plane *plan
 											  plane);
 	unsigned int trace_seq;
 	int idx;
+
+	/* A disable must not leave a selector switch armed for a later frame. */
+	atomic_set(&idev->flip_pending, 0);
 
 	if (!drm_dev_enter(dev, &idx))
 		return;
@@ -468,9 +494,29 @@ static int vita_iftu_crtc_helper_atomic_check(struct drm_crtc *crtc,
 	return 0;
 }
 
+/*
+ * M3-B1: hand the completion event to the vblank ISR when a selector switch is
+ * pending, so userspace is not told the flip finished before the frame that
+ * carries it has been scanned out. Commits that did not blit anything leave the
+ * event alone and the core delivers it normally.
+ */
+static void vita_iftu_crtc_helper_atomic_flush(struct drm_crtc *crtc,
+					      struct drm_atomic_state *state)
+{
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
+
+	if (!crtc_state->event || !atomic_read(&idev->flip_pending))
+		return;
+
+	drm_crtc_arm_vblank_event(crtc, crtc_state->event);
+	crtc_state->event = NULL;
+}
+
 static const struct drm_crtc_helper_funcs vita_iftu_crtc_helper_funcs = {
 	.mode_valid = vita_iftu_crtc_helper_mode_valid,
 	.atomic_check = vita_iftu_crtc_helper_atomic_check,
+	.atomic_flush = vita_iftu_crtc_helper_atomic_flush,
 };
 
 /*
@@ -488,6 +534,21 @@ static irqreturn_t vita_iftu_irq_handler(int irq, void *data)
 		/* Write-to-clear ack, then signal the core. */
 		writel(status, idev->dsi_regs + IFTU_DSI_INTR_STATUS);
 		atomic64_inc(&idev->vblank_count);
+
+		/*
+		 * M3-B1: this ISR is the only place the selector is written for
+		 * a userspace flip. Doing it here means the switch lands on a
+		 * frame boundary without the commit path ever sleeping, and the
+		 * vblank event armed in atomic_flush is delivered for exactly
+		 * the frame that switched.
+		 */
+		if (atomic_xchg(&idev->flip_pending, 0)) {
+			unsigned int next = idev->live_cfg ^ 1u;
+
+			writel(next, idev->control_regs + IFTU_CREG_PLANE_SEL(0));
+			idev->live_cfg = next;
+		}
+
 		drm_crtc_handle_vblank(&idev->crtc);
 	}
 
