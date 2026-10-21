@@ -10,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/ktime.h>
+#include <linux/moduleparam.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/seq_file.h>
@@ -44,6 +45,11 @@
 #define DRIVER_MINOR	0
 
 #define VITA_IFTU_TRACE_LIMIT	64
+
+/* Supervised M3-E only; ordinary boots retain the no-client baseline. */
+static bool enable_fbdev;
+module_param_named(fbdev, enable_fbdev, bool, 0400);
+MODULE_PARM_DESC(fbdev, "Opt in to experimental IFTU framebuffer-console takeover");
 
 /* IFTU control-block offsets, verified on PSTV bus 1 (0xE5032000). */
 #define IFTU_CREG_CONTROL		0x00
@@ -1048,7 +1054,7 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	drm_debugfs_add_file(dev, "iftu_state", vita_iftu_debugfs_state_show, NULL);
 
 	/*
-	 * fbdev-console emulation DELIBERATELY DISABLED (2026-08-30).
+	 * fbdev-console emulation: historical failure record and M3-E opt-in.
 	 *
 	 * drm_fbdev_shmem_setup() drives DRM's client helper through a real
 	 * first atomic commit onto the primary plane -- the actual first
@@ -1089,11 +1095,13 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	 * lab/gpu-re/IFTU-M2-GATE{A,B,C,D}-RESULT-2026-09-01.md (research
 	 * commits 5d47f54, 5f0fd77..4459066).
 	 *
-	 * Automatic fbdev-console takeover remains disabled and unvalidated.
-	 * Do not re-enable this call until the debugfs flip path is wired
-	 * into DRM's atomic page_flip API (userspace drmModePageFlip) and an
-	 * explicit fbdev-console gate passes on hardware.
+	 * Automatic fbdev-console takeover remains OFF by default. M3-B2
+	 * passed on 2026-10-21; M3-C throughput did not meet refresh cadence.
+	 * The opt-in parameter allows a separate, supervised M3-E console
+	 * usability gate, not a claim that sustained full-rate flips passed.
 	 */
+	if (enable_fbdev)
+		drm_fbdev_shmem_setup(dev, 32);
 
 	return 0;
 }
