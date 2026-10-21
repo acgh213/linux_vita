@@ -1,54 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * vita-iftu: DRM driver for the PS Vita / PS TV IFTU display controller.
- *
- * M1 milestone (see lab/gpu-re/DISPLAY-DRM-RESEARCH-2026-08-30.md): takes
- * over the framebuffer the bare-metal loader already configured and scanned
- * out, exactly the way drivers/gpu/drm/tiny/simpledrm.c takes over a
- * "simple-framebuffer" node -- fixed mode, one plane, no modeset, no
- * hardware page flip and no vblank IRQ yet. This is the WORKING FOUNDATION
- * the later milestones extend:
- *
- *   M1 (this file) -- inherited-mode takeover, CPU blit into CDRAM
- *   M2 -- dual plane-config hardware page flip + real/fake vblank
- *   M3 -- real IFTU modesetting, scaling, CSC, second plane
- *   M4 -- DSI host + ADV7533 bridge, full cold modeset
- *
- * Everything this file assumes about the hardware is hardware-verified, not
- * guessed -- see the register map and citations in
- * lab/gpu-re/IFTU-VBLANK-FINDING-2026-08-30.md and
- * lab/gpu-re/VBLANK-52HZ-RESOLVED-2026-08-30.md:
- *
- *   - IFTU plane regs:    base + bus*0x10000 + plane*0x1000
- *   - IFTU control regs:  base + 0x2000 + bus*0x10000
- *   - PSTV is bus 1 (HDMI). Bus 0 (OLED/LCD) is clock-gated on PSTV and
- *     SIGBUSes on read -- this driver only ever touches the bus given to it
- *     via devicetree "reg", never assumes or scans the other bus.
- *   - CDRAM (0x20000000, 128 MiB on PSTV) already holds a live, correctly
- *     scanned-out framebuffer at boot. Format is IFTU pixelformat 0x10 =
- *     "a8b8g8r8" in DT terms (BGRX8888 per the wiki's naming).
- *   - The bootloader also populated a SECOND, identically-configured
- *     plane-config (config 1) pointing at the same buffer. This driver does
- *     not yet use it (that is M2's dual-buffer flip); for M1 that config is
- *     left completely alone.
- *   - Real refresh rate is measured at 52.099 Hz (20/23 of the loader
- *     table's nominal 74.1758 MHz pixel clock -- root cause not yet
- *     resolved, see the M-1-numbered doc above). The DRM mode below encodes
- *     the MEASURED clock, not the nominal one, so userspace vrefresh
- *     queries are honest.
- *
- * STRICTLY NO MMIO WRITES to the plane/control registers in this file yet:
- * M1 only maps the inherited CDRAM buffer as write-combining memory and
- * blits into it, exactly like simpledrm's system-memory path. The IFTU
- * plane/control "reg" resource is mapped and stashed for M2, and read from
- * for validation (get_scanout_buffer sanity, not correctness-critical), but
- * nothing in this driver's probe or update paths currently writes it. Do
- * not add plane-select or CSC writes here -- that belongs in the M2 patch
- * once the config-select atomicity question is answered on hardware.
+ * Fixed inherited-mode IFTU scanout, with CPU shadow copies into two CDRAM
+ * buffers. Only the vblank ISR switches plane A's selector. The loader still
+ * owns clocks, timing, HDMI and the DSI interrupt mask; this is not cold modeset.
  */
 
 #include <linux/atomic.h>
-#include <linux/delay.h>
+#include <linux/dma-fence.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/of_address.h>
@@ -65,6 +23,7 @@
 #include <drm/drm_device.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_shmem.h>
+#include <drm/drm_file.h>
 #include <drm/drm_format_helper.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_atomic_helper.h>
@@ -85,22 +44,12 @@
 
 #define VITA_IFTU_TRACE_LIMIT	64
 
-/* IFTU control-block offsets, relative to the "control" reg resource.
- * Verified live on PSTV bus 1 (0xE5032000): CONTROL=0x1 (enabled),
- * CONTROL2=0x1 (alpha enabled), PLANE_A_SEL=0, PLANE_B_SEL=0.
- * Not written by M1 -- kept here for M2's plane-flip patch and for
- * a read-only sanity check in probe().
- */
+/* IFTU control-block offsets, verified on PSTV bus 1 (0xE5032000). */
 #define IFTU_CREG_CONTROL		0x00
 #define IFTU_CREG_CONTROL_ENABLE	BIT(0)
 #define IFTU_CREG_CONTROL2		0x04
 #define IFTU_CREG_PLANE_SEL(plane)	(0x10 + (plane) * 0x08)
 
-/* Per-frame vblank flag inside the planes window (0xE5031004 absolute),
- * verified 2026-08-30: toggles 0..1 once per frame. Polled for the
- * page-flip sync; the DSI IRQ (Gate A) is the DRM-side vblank source.
- */
-#define IFTU_PREG_VBLANK_FLAG		0x1004
 #define IFTU_PREG_SCANLINE		0x0008
 #define IFTU_PREG_SCANOUT_BYTE		0x0030
 
@@ -123,6 +72,8 @@
  */
 #define IFTU_PLANE_A_CFG(plane)		(0x200 + (plane) * 0x100)
 #define IFTU_PCFG_FB_PADDR		0x00
+#define IFTU_PCFG_SRC_X			0x24
+#define IFTU_PCFG_SRC_Y			0x28
 #define IFTU_PCFG_SRC_PIXELFMT		0x40
 #define IFTU_PCFG_SRC_FB_W		0x44
 #define IFTU_PCFG_SRC_FB_H		0x48
@@ -144,10 +95,7 @@
 struct vita_iftu_device {
 	struct drm_device dev;
 
-	/* IFTU register windows. control_regs is unused (read-only sanity
-	 * check only) until the M2 plane-flip patch. dsi_regs is the DSI
-	 * bus-1 interrupt block, claimed for the M2 vblank IRQ.
-	 */
+	/* Only the devicetree-selected bus is mapped; the other may be gated. */
 	void __iomem *plane_regs;
 	void __iomem *control_regs;
 	void __iomem *dsi_regs;
@@ -184,15 +132,24 @@ struct vita_iftu_device {
 	/* Bounded callback trace for the supervised first-commit test. */
 	atomic_t trace_count;
 
-	/* M3-B1: the selector is switched in the vblank ISR, not in
-	 * atomic_update(). The commit path runs in atomic context and must not
-	 * sleep, while the frame boundary is exactly where the switch has to
-	 * land. atomic_update() blits into the inactive buffer and marks a
-	 * flip pending; the ISR writes the selector and the DRM event is armed
-	 * on the same frame the switch happens.
+	/* All publication/ISR/lifecycle state is protected by flip_lock.
+	 * Atomic helpers run in process context. Copy pixels outside the lock,
+	 * then publish one complete target/event/ref record in atomic_flush.
+	 * First-enable flush precedes atomic_enable in the default helper tail.
 	 */
+	spinlock_t flip_lock;
 	unsigned int live_cfg;
-	atomic_t flip_pending;
+	bool enabled;
+	struct {
+		unsigned int target;
+		bool valid;
+		bool ready;
+		bool ref;
+		struct drm_pending_vblank_event *event;
+	} pending;
+	/* Commit-local preparation; helper dependency waits serialize this CRTC. */
+	unsigned int copy_target;
+	bool copy_ok;
 };
 
 static struct vita_iftu_device *vita_iftu_device_of_dev(struct drm_device *dev)
@@ -295,6 +252,14 @@ static int vita_iftu_primary_plane_helper_atomic_check(struct drm_plane *plane,
 	else if (!new_plane_state->visible)
 		return 0;
 
+	/* No partial positioning/scaling: every copied target is one full mode. */
+	if (new_plane_state->dst.x1 || new_plane_state->dst.y1 ||
+	    drm_rect_width(&new_plane_state->dst) != 1280 ||
+	    drm_rect_height(&new_plane_state->dst) != 720 ||
+	    (new_plane_state->src.x1 & 0xffff) ||
+	    (new_plane_state->src.y1 & 0xffff))
+		return -EINVAL;
+
 	if (vita_iftu_trace_take(idev, &trace_seq))
 		drm_dbg(dev, "vita-iftu trace[%u] check old(crtc=%d fb=%d) "
 			 "new(crtc=%d fb=%d visible=%d) src=%d,%d-%d,%d "
@@ -320,81 +285,56 @@ static int vita_iftu_primary_plane_helper_atomic_check(struct drm_plane *plane,
 }
 
 static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane,
-							  struct drm_atomic_state *state)
+						  struct drm_atomic_state *state)
 {
-	struct drm_plane_state *plane_state = drm_atomic_get_new_plane_state(state, plane);
-	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state, plane);
-	struct drm_shadow_plane_state *shadow_plane_state = to_drm_shadow_plane_state(plane_state);
-	struct drm_framebuffer *fb = plane_state->fb;
-	struct drm_device *dev = plane->dev;
-	struct vita_iftu_device *idev = vita_iftu_device_of_dev(dev);
-	struct drm_atomic_helper_damage_iter iter;
-	struct drm_rect damage;
-	unsigned int trace_seq;
-	unsigned int back_cfg = idev->live_cfg ^ 1u;
-	size_t back_offset = (size_t)back_cfg * idev->pitch * idev->mode.vdisplay;
-	bool blitted = false;
+	struct drm_plane_state *ps = drm_atomic_get_new_plane_state(state, plane);
+	struct drm_shadow_plane_state *shadow = to_drm_shadow_plane_state(ps);
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(plane->dev);
+	struct drm_rect clip = ps->src;
+	struct iosys_map dst = idev->screen_base;
+	unsigned long flags;
 	int ret, idx;
 
-	if (vita_iftu_trace_take(idev, &trace_seq))
-		drm_dbg(dev, "vita-iftu trace[%u] update old_fb=%d new_fb=%d "
-			 "visible=%d src=%d,%d-%d,%d dst=%d,%d-%d,%d\n",
-			 trace_seq, !!old_plane_state->fb, !!fb,
-			 plane_state->visible,
-			 plane_state->src.x1, plane_state->src.y1,
-			 plane_state->src.x2, plane_state->src.y2,
-			 plane_state->dst.x1, plane_state->dst.y1,
-			 plane_state->dst.x2, plane_state->dst.y2);
-
-	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
-	if (vita_iftu_trace_take(idev, &trace_seq))
-		drm_dbg(dev, "vita-iftu trace[%u] begin_fb_access ret=%d\n",
-			 trace_seq, ret);
-	if (ret)
+	if (!ps->visible)
 		return;
 
-	if (!drm_dev_enter(dev, &idx))
-		goto out_end_cpu_access;
+	idev->copy_ok = false;
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	if (idev->pending.valid) {
+		/* Dependency timeouts must not let us overwrite a queued target. */
+		spin_unlock_irqrestore(&idev->flip_lock, flags);
+		drm_err(plane->dev, "previous presentation still pending\n");
+		return;
+	}
+	idev->copy_target = idev->live_cfg ^ 1;
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
 
-	/*
-	 * IMPORTANT (see IFTU-VBLANK-FINDING-2026-08-30.md §3): the
-	 * framebuffer read path measured 25.7 MB/s vs 167 MB/s for writes --
-	 * ~6.5x slower. drm_fb_blit() reads the shadow-plane source (system
-	 * memory) and writes to sdev->screen_base (CDRAM) -- the correct
-	 * direction. Never add a path that reads screen_base.
-	 */
-	drm_atomic_helper_damage_iter_init(&iter, old_plane_state, plane_state);
-	drm_atomic_for_each_plane_damage(&iter, &damage) {
-		struct drm_rect dst_clip = plane_state->dst;
-		struct iosys_map dst = idev->screen_base;
-
-		if (!drm_rect_intersect(&dst_clip, &damage))
-			continue;
-
-		iosys_map_incr(&dst, back_offset +
-			       drm_fb_clip_offset(idev->pitch, idev->format, &dst_clip));
-		ret = drm_fb_blit(&dst, &idev->pitch, idev->format->format,
-				  shadow_plane_state->data, fb, &damage,
-				  &shadow_plane_state->fmtcnv_state);
-		blitted = true;
-		if (vita_iftu_trace_take(idev, &trace_seq))
-			drm_dbg(dev, "vita-iftu trace[%u] damage=%d,%d-%d,%d blit_ret=%d\n",
-				 trace_seq, damage.x1, damage.y1, damage.x2, damage.y2, ret);
+	ret = drm_gem_fb_begin_cpu_access(ps->fb, DMA_FROM_DEVICE);
+	if (ret)
+		goto out_error;
+	if (!drm_dev_enter(plane->dev, &idx)) {
+		ret = -ENODEV;
+		goto out_access;
 	}
 
-	/*
-	 * Only arm a flip if pixels actually landed in the back buffer. A
-	 * commit with no damage must not switch the selector, or it would
-	 * present a stale buffer as if it were new.
+	/* Ping-pong buffers are not damage-history coherent. Always copy the
+	 * complete visible frame, never read the slow CDRAM scanout back.
 	 */
-	if (blitted)
-		atomic_set(&idev->flip_pending, 1);
-
+	drm_rect_fp_to_int(&clip, &clip);
+	iosys_map_incr(&dst, idev->copy_target * VITA_IFTU_SECOND_FB_OFFSET);
+	ret = drm_fb_blit(&dst, &idev->pitch, idev->format->format,
+			  shadow->data, ps->fb, &clip, &shadow->fmtcnv_state);
+	/* Drain WC pixel stores on the producing CPU BEFORE publishing a
+	 * selector request to an IRQ that may execute on another CPU.
+	 */
+	wmb();
+	idev->copy_ok = !ret;
 	drm_dev_exit(idx);
-out_end_cpu_access:
-	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
-	if (vita_iftu_trace_take(idev, &trace_seq))
-		drm_dbg(dev, "vita-iftu trace[%u] end_fb_access\n", trace_seq);
+out_access:
+	drm_gem_fb_end_cpu_access(ps->fb, DMA_FROM_DEVICE);
+out_error:
+	if (ret)
+		drm_err(plane->dev, "frame copy failed: %d; scanout unchanged\n", ret);
 }
 
 static void vita_iftu_primary_plane_helper_atomic_disable(struct drm_plane *plane,
@@ -409,8 +349,7 @@ static void vita_iftu_primary_plane_helper_atomic_disable(struct drm_plane *plan
 	unsigned int trace_seq;
 	int idx;
 
-	/* A disable must not leave a selector switch armed for a later frame. */
-	atomic_set(&idev->flip_pending, 0);
+	/* CRTC atomic_disable drains pending events before plane teardown. */
 
 	if (!drm_dev_enter(dev, &idx))
 		return;
@@ -440,6 +379,8 @@ static int vita_iftu_primary_plane_helper_get_scanout_buffer(struct drm_plane *p
 	sb->format = idev->format;
 	sb->pitch[0] = idev->pitch;
 	sb->map[0] = idev->screen_base;
+	iosys_map_incr(&sb->map[0], READ_ONCE(idev->live_cfg) *
+		       VITA_IFTU_SECOND_FB_OFFSET);
 
 	return 0;
 }
@@ -467,58 +408,157 @@ static enum drm_mode_status vita_iftu_crtc_helper_mode_valid(struct drm_crtc *cr
 	return drm_crtc_helper_mode_valid_fixed(crtc, mode, &idev->mode);
 }
 
-/*
- * No vblank support in M1 -- .no_vblank is set on the crtc state in
- * atomic_check below, which makes DRM's atomic helper fake a vblank event
- * immediately on commit (documented behavior of drm_simple_display_pipe /
- * struct drm_crtc_state.no_vblank; see simpledrm and vkms for both ends of
- * this spectrum). M2 replaces this with drm_crtc_arm_vblank_event() driven
- * by the DSI IRQ (GIC 210 on PSTV) once the config-select flip is wired up
- * -- see the M2 entry in DISPLAY-DRM-RESEARCH-2026-08-30.md's milestone
- * ladder for exactly what changes.
- */
 static int vita_iftu_crtc_helper_atomic_check(struct drm_crtc *crtc,
 					       struct drm_atomic_state *state)
 {
-	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
-	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
-	unsigned int trace_seq;
-	int ret;
+	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
+	int ret = drm_crtc_helper_atomic_check(crtc, state);
 
-	ret = drm_crtc_helper_atomic_check(crtc, state);
-	if (ret)
-		return ret;
-
-	crtc_state->no_vblank = true;
-	if (vita_iftu_trace_take(idev, &trace_seq))
-		drm_dbg(crtc->dev, "vita-iftu trace[%u] crtc_check no_vblank=%d\n",
-			 trace_seq, crtc_state->no_vblank);
-	return 0;
+	cs->no_vblank = false;
+	return ret;
 }
 
-/*
- * M3-B1: hand the completion event to the vblank ISR when a selector switch is
- * pending, so userspace is not told the flip finished before the frame that
- * carries it has been scanned out. Commits that did not blit anything leave the
- * event alone and the core delivers it normally.
+/* Lock order: flip_lock -> DRM event_lock -> DRM vblank locks. */
+static void vita_iftu_send_event(struct drm_crtc *crtc,
+			       struct drm_pending_vblank_event *event)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	drm_crtc_send_vblank_event(crtc, event);
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+}
+
+/* Cancel a failed presentation, without delivering a success event. Helpers
+ * attach flip_done even to internal events: cancellation must release that
+ * completion/reference as well, or all subsequent commits will time out.
+ * The event has already been detached from driver/state under flip_lock.
  */
+static void vita_iftu_cancel_event(struct drm_device *dev,
+				 struct drm_pending_vblank_event *event)
+{
+	if (!event)
+		return;
+	if (event->base.completion) {
+		complete_all(event->base.completion);
+		event->base.completion_release(event->base.completion);
+		event->base.completion = NULL;
+	}
+	if (event->base.fence) {
+		dma_fence_set_error(event->base.fence, -EIO);
+		dma_fence_signal(event->base.fence);
+	}
+	drm_event_cancel_free(dev, &event->base);
+}
+
+/* flip_lock is held; acquire one vblank ref even for an internal/no-flip
+ * event. A first-enable record stays staged until vblank_on has run.
+ */
+static bool vita_iftu_publish(struct vita_iftu_device *idev)
+{
+	if (drm_crtc_vblank_get(&idev->crtc))
+		return false;
+	idev->pending.ref = true;
+	idev->pending.ready = true;
+	return true;
+}
+
+static void vita_iftu_crtc_helper_atomic_begin(struct drm_crtc *crtc,
+					    struct drm_atomic_state *state)
+{
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
+
+	unsigned long flags;
+
+	/* A no-plane-change commit still needs a real vblank completion.
+	 * Reject timed-out dependencies, even if their ISR finishes before flush.
+	 */
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	idev->copy_ok = !idev->pending.valid;
+	idev->copy_target = idev->live_cfg;
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
+}
+
 static void vita_iftu_crtc_helper_atomic_flush(struct drm_crtc *crtc,
 					      struct drm_atomic_state *state)
 {
-	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
 	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
+	struct drm_pending_vblank_event *cancel = NULL;
+	unsigned long flags;
 
-	if (!crtc_state->event || !atomic_read(&idev->flip_pending))
-		return;
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	if (!cs->active) {
+		/* Disable has no future vblank; complete its helper/user event. */
+		if (cs->event)
+			vita_iftu_send_event(crtc, cs->event);
+		cs->event = NULL;
+	} else if (!idev->copy_ok || WARN_ON(idev->pending.valid)) {
+		cancel = cs->event;
+		cs->event = NULL;
+	} else {
+		idev->pending.target = idev->copy_target;
+		idev->pending.event = cs->event;
+		idev->pending.valid = true;
+		cs->event = NULL;
+		if (idev->enabled && !vita_iftu_publish(idev)) {
+			cancel = idev->pending.event;
+			memset(&idev->pending, 0, sizeof(idev->pending));
+		}
+	}
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
+	vita_iftu_cancel_event(crtc->dev, cancel);
+}
 
-	drm_crtc_arm_vblank_event(crtc, crtc_state->event);
-	crtc_state->event = NULL;
+static void vita_iftu_crtc_helper_atomic_enable(struct drm_crtc *crtc,
+					       struct drm_atomic_state *state)
+{
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
+	struct drm_pending_vblank_event *cancel = NULL;
+	unsigned long flags;
+
+	drm_crtc_vblank_on(crtc);
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	idev->enabled = true;
+	if (idev->pending.valid && !vita_iftu_publish(idev)) {
+		cancel = idev->pending.event;
+		memset(&idev->pending, 0, sizeof(idev->pending));
+	}
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
+	vita_iftu_cancel_event(crtc->dev, cancel);
+}
+
+static void vita_iftu_crtc_helper_atomic_disable(struct drm_crtc *crtc,
+						struct drm_atomic_state *state)
+{
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(crtc->dev);
+	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
+	struct drm_pending_vblank_event *cancel;
+	unsigned long flags;
+
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	idev->enabled = false;
+	cancel = idev->pending.event;
+	if (idev->pending.ref)
+		drm_crtc_vblank_put(crtc);
+	memset(&idev->pending, 0, sizeof(idev->pending));
+	if (!cs->active && cs->event) {
+		vita_iftu_send_event(crtc, cs->event);
+		cs->event = NULL;
+	}
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
+	vita_iftu_cancel_event(crtc->dev, cancel);
+	/* vblank_off takes event_lock itself. Never call it under that lock. */
+	drm_crtc_vblank_off(crtc);
 }
 
 static const struct drm_crtc_helper_funcs vita_iftu_crtc_helper_funcs = {
 	.mode_valid = vita_iftu_crtc_helper_mode_valid,
 	.atomic_check = vita_iftu_crtc_helper_atomic_check,
+	.atomic_begin = vita_iftu_crtc_helper_atomic_begin,
 	.atomic_flush = vita_iftu_crtc_helper_atomic_flush,
+	.atomic_enable = vita_iftu_crtc_helper_atomic_enable,
+	.atomic_disable = vita_iftu_crtc_helper_atomic_disable,
 };
 
 /*
@@ -529,31 +569,32 @@ static const struct drm_crtc_helper_funcs vita_iftu_crtc_helper_funcs = {
 static irqreturn_t vita_iftu_irq_handler(int irq, void *data)
 {
 	struct vita_iftu_device *idev = data;
-	u32 status;
+	unsigned long flags;
+	u32 status = readl(idev->dsi_regs + IFTU_DSI_INTR_STATUS);
 
-	status = readl(idev->dsi_regs + IFTU_DSI_INTR_STATUS);
-	if (status & IFTU_DSI_INTR_VBLANK) {
-		/* Write-to-clear ack, then signal the core. */
-		writel(status, idev->dsi_regs + IFTU_DSI_INTR_STATUS);
-		atomic64_inc(&idev->vblank_count);
-
-		/*
-		 * M3-B1: this ISR is the only place the selector is written for
-		 * a userspace flip. Doing it here means the switch lands on a
-		 * frame boundary without the commit path ever sleeping, and the
-		 * vblank event armed in atomic_flush is delivered for exactly
-		 * the frame that switched.
-		 */
-		if (atomic_xchg(&idev->flip_pending, 0)) {
-			unsigned int next = idev->live_cfg ^ 1u;
-
-			writel(next, idev->control_regs + IFTU_CREG_PLANE_SEL(0));
-			idev->live_cfg = next;
-		}
-
-		drm_crtc_handle_vblank(&idev->crtc);
+	if (!(status & IFTU_DSI_INTR_VBLANK))
+		return IRQ_NONE;
+	writel(status, idev->dsi_regs + IFTU_DSI_INTR_STATUS);
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	atomic64_inc(&idev->vblank_count);
+	if (idev->enabled && idev->pending.ready) {
+		writel(idev->pending.target,
+		       idev->control_regs + IFTU_CREG_PLANE_SEL(0));
+		/* Flush the posted selector write before reporting completion. */
+		readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0));
+		WRITE_ONCE(idev->live_cfg, idev->pending.target);
 	}
-
+	/* Core updates its counter/events before our flip completion is sent. */
+	if (idev->enabled)
+		drm_crtc_handle_vblank(&idev->crtc);
+	if (idev->enabled && idev->pending.ready) {
+		if (idev->pending.event)
+			vita_iftu_send_event(&idev->crtc, idev->pending.event);
+		if (idev->pending.ref)
+			drm_crtc_vblank_put(&idev->crtc);
+		memset(&idev->pending, 0, sizeof(idev->pending));
+	}
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -687,53 +728,6 @@ static void vita_iftu_program_second_config(struct drm_device *dev,
 }
 
 /*
- * M2 Gate C: one hardware page flip. Wait for the next vblank edge (the
- * per-frame flag in the planes window), then toggle PLANE_A_SEL so the
- * display switches between config 0 (inherited framebuffer) and config 1
- * (second buffer). This is the first write to the selector register --
- * the actual page flip. The DRM-side vblank event comes from the DSI IRQ
- * (Gate A); this sync only ensures the selector write lands at the frame
- * boundary, so the visible switch should be tear-free.
- *
- * The caller (debugfs "flip" show) reads the file to perform ONE flip.
- */
-static int vita_iftu_do_page_flip(struct drm_device *dev,
-				  struct vita_iftu_device *idev)
-{
-	u32 sel, new_sel, vblank, prev_vblank;
-	unsigned int polls = 0;
-
-	sel = readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0));
-	new_sel = sel ? 0 : 1;
-
-	/* Wait for a vblank edge: the flag toggles once per frame (~52 Hz
-	 * on PSTV, ~19 ms period, so each phase lasts ~9.6 ms). Sleep-poll
-	 * with a small delay so the window spans several frame periods --
-	 * a tight bounded spin only covers ~1-5 ms and misses the edge.
-	 * Bound at ~200 ms; a dead display must not hang the caller.
-	 */
-	prev_vblank = readl(idev->plane_regs + IFTU_PREG_VBLANK_FLAG);
-	do {
-		usleep_range(500, 1000);
-		vblank = readl(idev->plane_regs + IFTU_PREG_VBLANK_FLAG);
-		if (vblank != prev_vblank)
-			break;
-	} while (++polls < 200);
-
-	if (vblank == prev_vblank) {
-		drm_err(dev, "vita-iftu: vblank flag not toggling; flip aborted\n");
-		return -ETIMEDOUT;
-	}
-
-	writel(new_sel, idev->control_regs + IFTU_CREG_PLANE_SEL(0));
-
-	drm_info(dev, "vita-iftu: page flip %u -> %u (vblank edge after %u polls)\n",
-		 sel, new_sel, polls);
-
-	return 0;
-}
-
-/*
  * M3-B2 evidence. The userspace probe cannot read the IFTU register window
  * itself without /dev/mem, so the driver reports what the hardware is doing.
  * Both the driver's belief (live_cfg) and the actual register read are printed:
@@ -744,31 +738,25 @@ static int vita_iftu_debugfs_state_show(struct seq_file *m, void *data)
 {
 	struct drm_debugfs_entry *entry = m->private;
 	struct vita_iftu_device *idev = vita_iftu_device_of_dev(entry->dev);
+	unsigned long flags;
+	u32 selector, live, pending, scanline, byte;
+	u64 count;
+	int idx;
 
-	seq_printf(m, "selector %u\n",
-		   readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0)) & 0x1);
-	seq_printf(m, "live_cfg %u\n", idev->live_cfg);
-	seq_printf(m, "flip_pending %d\n", atomic_read(&idev->flip_pending));
-	seq_printf(m, "scanline %u\n", readl(idev->plane_regs + IFTU_PREG_SCANLINE));
-	seq_printf(m, "scanout_byte %u\n",
-		   readl(idev->plane_regs + IFTU_PREG_SCANOUT_BYTE));
-	seq_printf(m, "vblank_count %llu\n",
-		   (unsigned long long)atomic64_read(&idev->vblank_count));
-	return 0;
-}
-
-static int vita_iftu_debugfs_flip_show(struct seq_file *m, void *data)
-{
-	struct drm_debugfs_entry *entry = m->private;
-	struct vita_iftu_device *idev = vita_iftu_device_of_dev(entry->dev);
-	int ret;
-
-	ret = vita_iftu_do_page_flip(entry->dev, idev);
-	if (ret) {
-		seq_puts(m, "flip failed\n");
-		return ret;
-	}
-	seq_puts(m, "flip ok\n");
+	if (!drm_dev_enter(entry->dev, &idx))
+		return -ENODEV;
+	spin_lock_irqsave(&idev->flip_lock, flags);
+	selector = readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0));
+	live = idev->live_cfg;
+	pending = idev->pending.valid;
+	scanline = readl(idev->plane_regs + IFTU_PREG_SCANLINE) >> 16;
+	byte = readl(idev->plane_regs + IFTU_PREG_SCANOUT_BYTE);
+	count = atomic64_read(&idev->vblank_count);
+	spin_unlock_irqrestore(&idev->flip_lock, flags);
+	drm_dev_exit(idx);
+	seq_printf(m, "selector %u\nlive_cfg %u\nflip_pending %u\n"
+		   "scanline %u\nscanout_byte %u\nvblank_count %llu\n",
+		   selector, live, pending, scanline, byte, count);
 	return 0;
 }
 
@@ -794,6 +782,7 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 		return ERR_CAST(idev);
 	dev = &idev->dev;
 	platform_set_drvdata(pdev, idev);
+	spin_lock_init(&idev->flip_lock);
 
 	ret = vita_iftu_get_u32(dev, of_node, "width", &width);
 	if (ret)
@@ -810,19 +799,13 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 		return ERR_CAST(idev->format);
 
 	idev->mode = vita_iftu_pstv_hdmi_mode();
-	if (idev->mode.hdisplay != width || idev->mode.vdisplay != height)
-		drm_warn(dev,
-			 "vita-iftu: devicetree %dx%d disagrees with the compiled-in "
-			 "%dx%d PSTV mode -- update vita_iftu_pstv_hdmi_mode() if this "
-			 "board's timing differs\n",
-			 width, height, idev->mode.hdisplay, idev->mode.vdisplay);
+	if (width != 1280 || height != 720 || stride != 5120) {
+		drm_err(dev, "only inherited 1280x720 stride 5120 is verified\n");
+		return ERR_PTR(-EINVAL);
+	}
 	idev->pitch = stride;
 
-	/*
-	 * IFTU plane/control registers. Mapped now so M2 has them ready and
-	 * so probe can do the read-only control-register sanity check
-	 * above; nothing in M1 writes through these pointers.
-	 */
+	/* Map only the loader-configured bus from devicetree. */
 	idev->plane_regs = devm_platform_ioremap_resource_byname(pdev, "planes");
 	if (IS_ERR(idev->plane_regs)) {
 		drm_err(dev, "vita-iftu: failed to map \"planes\" reg: %ld\n",
@@ -871,21 +854,34 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 		drm_err(dev, "vita-iftu: unexpected framebuffer resource %pr\n", mem);
 		return ERR_PTR(-EINVAL);
 	}
-	if ((u64)idev->pitch * height > resource_size(mem)) {
+	if ((u64)idev->pitch * height != VITA_IFTU_SECOND_FB_OFFSET ||
+	    VITA_IFTU_SECOND_FB_OFFSET + (u64)idev->pitch * height >
+	    resource_size(mem)) {
 		drm_err(dev, "vita-iftu: framebuffer %ux%u exceeds resource %pr\n",
 			width, height, mem);
 		return ERR_PTR(-EINVAL);
 	}
 
-	/*
-	 * M2 Gate B: the second page-flip buffer lives immediately after
-	 * the inherited framebuffer, inside the same CDRAM memory-region.
-	 * Program plane A config 1 (inactive) to point at it now so the
-	 * later page-flip gate only has to toggle the selector. Config 0
-	 * stays selected; the active scanout must remain untouched.
+	/* Reject an unexpected inherited state before ANY register writes.
+	 * Config 0 geometry/address below matches the verified loader capture.
 	 */
-	vita_iftu_program_second_config(dev, idev,
-					mem->start + VITA_IFTU_SECOND_FB_OFFSET);
+	if (readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0)) != 0 ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_FB_PADDR) != mem->start ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_X) != 0 ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_Y) != 0 ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_PIXELFMT) !=
+		IFTU_PIXFMT_A8B8G8R8 ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_FB_W) != width ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_FB_H) != height ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_DST_W) != width ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_DST_H) != height ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_W) !=
+		IFTU_SCALE_1X ||
+	    readl(idev->plane_regs + IFTU_PLANE_A_CFG(0) + IFTU_PCFG_SRC_H) !=
+		IFTU_SCALE_1X) {
+		drm_err(dev, "unverified inherited plane A state; refusing takeover\n");
+		return ERR_PTR(-EINVAL);
+	}
 
 	ret = devm_aperture_acquire_from_firmware(dev, mem->start, resource_size(mem));
 	if (ret) {
@@ -897,6 +893,8 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	if (IS_ERR(screen_base))
 		return ERR_CAST(screen_base);
 	iosys_map_set_vaddr(&idev->screen_base, screen_base);
+	vita_iftu_program_second_config(dev, idev,
+					mem->start + VITA_IFTU_SECOND_FB_OFFSET);
 
 	drm_dbg(dev, "vita-iftu: framebuffer format=%p4cc, size=%dx%d, stride=%d, mode="
 		     DRM_MODE_FMT "\n",
@@ -949,6 +947,7 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	if (ret)
 		return ERR_PTR(ret);
 	atomic64_set(&idev->vblank_count, 0);
+	drm_crtc_vblank_reset(crtc);
 
 	encoder = &idev->encoder;
 	ret = drm_encoder_init(dev, encoder, &vita_iftu_encoder_funcs,
@@ -1001,20 +1000,8 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	dev = &idev->dev;
 	atomic_set(&idev->trace_count, 0);
 
-	ret = drm_dev_register(dev, 0);
-	if (ret)
-		return ret;
-
-	/*
-	 * M2 Gate A vblank IRQ. The loader armed the DSI-side mask; the
-	 * GIC line (SPI 178 = hardware IRQ 210) is disabled until claimed
-	 * here. request_irq before drm_dev_register would leave a window
-	 * where the ISR could call drm_crtc_handle_vblank() on an
-	 * unregistered device, so the request happens after registration.
-	 * The crtc is initialized in device_create, so handle_vblank is
-	 * safe from this point on. Failure is fatal: an unclaimed but
-	 * enabled line can produce spurious IRQs, and M2 vblank needs the
-	 * line claimed anyway.
+	/* CRTC/vblank state is initialized before requesting the IRQ. Claim
+	 * it before registration can expose commits to userspace.
 	 */
 	idev->irq = platform_get_irq(pdev, 0);
 	if (idev->irq < 0) {
@@ -1031,14 +1018,11 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	}
 	drm_info(dev, "vita-iftu: vblank IRQ %d claimed\n", idev->irq);
 
-	/*
-	 * M2 Gate C: reading /sys/kernel/debug/dri/0/flip performs ONE
-	 * vblank-synced page flip (selector toggle). Supervised use only;
-	 * this is the first write to the selector register and the gate
-	 * runs it exactly once from a client, then verifies and rolls back.
-	 */
-	drm_debugfs_add_file(dev, "flip", vita_iftu_debugfs_flip_show, NULL);
-	drm_debugfs_add_file(dev, "state", vita_iftu_debugfs_state_show, NULL);
+	ret = drm_dev_register(dev, 0);
+	if (ret)
+		return ret;
+
+	drm_debugfs_add_file(dev, "iftu_state", vita_iftu_debugfs_state_show, NULL);
 
 	/*
 	 * fbdev-console emulation DELIBERATELY DISABLED (2026-08-30).
