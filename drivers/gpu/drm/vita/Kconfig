@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
-config DRM_VITA_IFTU
+config DRM_VITA
 	tristate "DRM support for the PS Vita / PS TV IFTU display controller"
 	depends on DRM && (ARCH_VITA || COMPILE_TEST)
 	select APERTURE_HELPERS
