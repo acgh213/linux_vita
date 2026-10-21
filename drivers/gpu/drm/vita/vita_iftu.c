@@ -9,6 +9,7 @@
 #include <linux/dma-fence.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/ktime.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/seq_file.h>
@@ -150,6 +151,12 @@ struct vita_iftu_device {
 	/* Commit-local preparation; helper dependency waits serialize this CRTC. */
 	unsigned int copy_target;
 	bool copy_ok;
+	atomic64_t copy_count;
+	atomic64_t copy_total_ns;
+	atomic64_t copy_last_ns;
+	atomic64_t present_count;
+	atomic64_t wait_total_ns;
+	u64 ready_ns;
 };
 
 static struct vita_iftu_device *vita_iftu_device_of_dev(struct drm_device *dev)
@@ -293,6 +300,7 @@ static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane
 	struct drm_rect clip = ps->src;
 	struct iosys_map dst = idev->screen_base;
 	unsigned long flags;
+	u64 copy_start, copy_ns;
 	int ret, idx;
 
 	if (!ps->visible)
@@ -322,12 +330,18 @@ static void vita_iftu_primary_plane_helper_atomic_update(struct drm_plane *plane
 	 */
 	drm_rect_fp_to_int(&clip, &clip);
 	iosys_map_incr(&dst, idev->copy_target * VITA_IFTU_SECOND_FB_OFFSET);
+	copy_start = ktime_get_ns();
 	ret = drm_fb_blit(&dst, &idev->pitch, idev->format->format,
 			  shadow->data, ps->fb, &clip, &shadow->fmtcnv_state);
 	/* Drain WC pixel stores on the producing CPU BEFORE publishing a
 	 * selector request to an IRQ that may execute on another CPU.
+	 * Include that drain in the observed copy duration.
 	 */
 	wmb();
+	copy_ns = ktime_get_ns() - copy_start;
+	atomic64_set(&idev->copy_last_ns, copy_ns);
+	atomic64_add(copy_ns, &idev->copy_total_ns);
+	atomic64_inc(&idev->copy_count);
 	idev->copy_ok = !ret;
 	drm_dev_exit(idx);
 out_access:
@@ -459,6 +473,7 @@ static bool vita_iftu_publish(struct vita_iftu_device *idev)
 	if (drm_crtc_vblank_get(&idev->crtc))
 		return false;
 	idev->pending.ref = true;
+	idev->ready_ns = ktime_get_ns();
 	idev->pending.ready = true;
 	return true;
 }
@@ -583,6 +598,8 @@ static irqreturn_t vita_iftu_irq_handler(int irq, void *data)
 		/* Flush the posted selector write before reporting completion. */
 		readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0));
 		WRITE_ONCE(idev->live_cfg, idev->pending.target);
+		atomic64_inc(&idev->present_count);
+		atomic64_add(ktime_get_ns() - idev->ready_ns, &idev->wait_total_ns);
 	}
 	/* Core updates its counter/events before our flip completion is sent. */
 	if (idev->enabled)
@@ -654,18 +671,17 @@ static const struct drm_mode_config_funcs vita_iftu_mode_config_funcs = {
  */
 
 /*
- * Build the fixed mode from MEASURED timing, not the loader's nominal
- * table entry. See lab/gpu-re/VBLANK-52HZ-RESOLVED-2026-08-30.md: htotal
- * and vtotal are exactly as the loader's VIC-4 table says (1650 x 750 --
- * confirmed by the frame-period / line-period ratio landing on 750.01
- * lines), but the pixel clock is 20/23 of the nominal 74.1758 MHz, i.e.
- * ~64.473 MHz measured over a 60 s precision count (52.099142 Hz, 3126
- * edges). DRM's "clock" field is in kHz.
+ * Describe the inherited VIC-4 mode; do not program clocks or timing.
+ * The old 64473 kHz/52 Hz inference predated the A9 timer correction.
+ * With periphclk=165667500, 3600 IRQs over about 60.058 s agree with
+ * 59.94 Hz and the loader's nominal 74.1758 MHz (rounded to kHz below).
+ * This is metadata only. Timer/PLL registers are deliberately untouched.
+ * Evidence: umbrella lab/gates/2026-10-21-m3-corrected-boot/cadence-60s.json.
  */
 static struct drm_display_mode vita_iftu_pstv_hdmi_mode(void)
 {
 	struct drm_display_mode mode = {
-		DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 64473,
+		DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74176,
 			 1280, 1390, 1430, 1650, 0,
 			 720, 725, 730, 750, 0,
 			 DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC),
@@ -757,6 +773,13 @@ static int vita_iftu_debugfs_state_show(struct seq_file *m, void *data)
 	seq_printf(m, "selector %u\nlive_cfg %u\nflip_pending %u\n"
 		   "scanline %u\nscanout_byte %u\nvblank_count %llu\n",
 		   selector, live, pending, scanline, byte, count);
+	seq_printf(m, "copy_count %lld\ncopy_total_ns %lld\ncopy_last_ns %lld\n"
+		   "present_count %lld\nwait_total_ns %lld\n",
+		   atomic64_read(&idev->copy_count),
+		   atomic64_read(&idev->copy_total_ns),
+		   atomic64_read(&idev->copy_last_ns),
+		   atomic64_read(&idev->present_count),
+		   atomic64_read(&idev->wait_total_ns));
 	return 0;
 }
 
