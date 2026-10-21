@@ -101,6 +101,8 @@
  * page-flip sync; the DSI IRQ (Gate A) is the DRM-side vblank source.
  */
 #define IFTU_PREG_VBLANK_FLAG		0x1004
+#define IFTU_PREG_SCANLINE		0x0008
+#define IFTU_PREG_SCANOUT_BYTE		0x0030
 
 /* DSI bus-1 interrupt block (relative to the "dsi" reg resource at
  * 0xE5060000). Hardware-verified 2026-08-30: status/ack +0x50 = 0xE
@@ -731,6 +733,30 @@ static int vita_iftu_do_page_flip(struct drm_device *dev,
 	return 0;
 }
 
+/*
+ * M3-B2 evidence. The userspace probe cannot read the IFTU register window
+ * itself without /dev/mem, so the driver reports what the hardware is doing.
+ * Both the driver's belief (live_cfg) and the actual register read are printed:
+ * if those two ever disagree, the belief is the thing that is wrong, and this
+ * file is how that gets caught instead of being assumed.
+ */
+static int vita_iftu_debugfs_state_show(struct seq_file *m, void *data)
+{
+	struct drm_debugfs_entry *entry = m->private;
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(entry->dev);
+
+	seq_printf(m, "selector %u\n",
+		   readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0)) & 0x1);
+	seq_printf(m, "live_cfg %u\n", idev->live_cfg);
+	seq_printf(m, "flip_pending %d\n", atomic_read(&idev->flip_pending));
+	seq_printf(m, "scanline %u\n", readl(idev->plane_regs + IFTU_PREG_SCANLINE));
+	seq_printf(m, "scanout_byte %u\n",
+		   readl(idev->plane_regs + IFTU_PREG_SCANOUT_BYTE));
+	seq_printf(m, "vblank_count %llu\n",
+		   (unsigned long long)atomic64_read(&idev->vblank_count));
+	return 0;
+}
+
 static int vita_iftu_debugfs_flip_show(struct seq_file *m, void *data)
 {
 	struct drm_debugfs_entry *entry = m->private;
@@ -1012,6 +1038,7 @@ static int vita_iftu_probe(struct platform_device *pdev)
 	 * runs it exactly once from a client, then verifies and rolls back.
 	 */
 	drm_debugfs_add_file(dev, "flip", vita_iftu_debugfs_flip_show, NULL);
+	drm_debugfs_add_file(dev, "state", vita_iftu_debugfs_state_show, NULL);
 
 	/*
 	 * fbdev-console emulation DELIBERATELY DISABLED (2026-08-30).
