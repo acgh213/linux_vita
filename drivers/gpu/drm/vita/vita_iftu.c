@@ -51,6 +51,13 @@ static bool enable_fbdev;
 module_param_named(fbdev, enable_fbdev, bool, 0400);
 MODULE_PARM_DESC(fbdev, "Opt in to experimental IFTU framebuffer-console takeover");
 
+/* Bounded HDMI-black hypothesis test; equivalent to loader alpha=256 when
+ * the inherited alpha-value register is zero. No clock/timing changes.
+ */
+static bool restore_opaque;
+module_param_named(restore_opaque, restore_opaque, bool, 0400);
+MODULE_PARM_DESC(restore_opaque, "Opt in to restoring documented opaque plane-A alpha control");
+
 /* IFTU control-block offsets, verified on PSTV bus 1 (0xE5032000). */
 #define IFTU_CREG_CONTROL		0x00
 #define IFTU_CREG_CONTROL_ENABLE	BIT(0)
@@ -948,6 +955,19 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 		IFTU_SCALE_1X) {
 		drm_err(dev, "unverified inherited plane A state; refusing takeover\n");
 		return ERR_PTR(-EINVAL);
+	}
+
+	if (restore_opaque) {
+		if (readl(idev->plane_regs + 0x8c) != 0) {
+			drm_err(dev, "opaque test requires inherited alpha value zero\n");
+			return ERR_PTR(-EINVAL);
+		}
+		drm_info(dev, "opaque test: alpha control before=%08x\n",
+			 readl(idev->plane_regs + 0xa0));
+		/* libbaremetal iftu_plane_set_alpha(bus, plane, 256). */
+		writel(1, idev->plane_regs + 0xa0);
+		drm_info(dev, "opaque test: alpha control after=%08x\n",
+			 readl(idev->plane_regs + 0xa0));
 	}
 
 	ret = devm_aperture_acquire_from_firmware(dev, mem->start, resource_size(mem));
