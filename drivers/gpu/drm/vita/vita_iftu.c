@@ -784,6 +784,49 @@ static int vita_iftu_debugfs_state_show(struct seq_file *m, void *data)
 	return 0;
 }
 
+/* Read-only diagnostics of the actual CDRAM buffers, not fbdev's shadow.
+ * No selector writes and no long-held IRQ lock. The two-buffer capture may
+ * race a repaint; callers must compare independent before/after state.
+ */
+static int vita_iftu_debugfs_buffers_show(struct seq_file *m, void *data)
+{
+	struct drm_debugfs_entry *entry = m->private;
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(entry->dev);
+	int idx;
+
+	if (!drm_dev_enter(entry->dev, &idx))
+		return -ENODEV;
+	seq_write(m, idev->screen_base.vaddr, 2 * VITA_IFTU_SECOND_FB_OFFSET);
+	drm_dev_exit(idx);
+	return 0;
+}
+
+static int vita_iftu_debugfs_hw_show(struct seq_file *m, void *data)
+{
+	static const u32 cfg_offsets[] = { 0x00, 0x24, 0x28, 0x40, 0x44, 0x48,
+		0xa4, 0xa8, 0xc0, 0xc4, 0xc8, 0xcc };
+	struct drm_debugfs_entry *entry = m->private;
+	struct vita_iftu_device *idev = vita_iftu_device_of_dev(entry->dev);
+	unsigned int cfg, i;
+	int idx;
+
+	if (!drm_dev_enter(entry->dev, &idx))
+		return -ENODEV;
+	seq_printf(m, "control %08x\ncontrol2 %08x\nselector %08x\n",
+		readl(idev->control_regs + IFTU_CREG_CONTROL),
+		readl(idev->control_regs + IFTU_CREG_CONTROL2),
+		readl(idev->control_regs + IFTU_CREG_PLANE_SEL(0)));
+	/* Loader's plane-wide alpha registers, documented at +0x8c/+0xa0. */
+	seq_printf(m, "plane_alpha_8c %08x\nplane_alpha_a0 %08x\n",
+		readl(idev->plane_regs + 0x8c), readl(idev->plane_regs + 0xa0));
+	for (cfg = 0; cfg < 2; cfg++)
+		for (i = 0; i < ARRAY_SIZE(cfg_offsets); i++)
+			seq_printf(m, "cfg%u_%02x %08x\n", cfg, cfg_offsets[i],
+				readl(idev->plane_regs + IFTU_PLANE_A_CFG(cfg) + cfg_offsets[i]));
+	drm_dev_exit(idx);
+	return 0;
+}
+
 static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver *drv,
 							 struct platform_device *pdev)
 {
@@ -1052,6 +1095,8 @@ static int vita_iftu_probe(struct platform_device *pdev)
 		return ret;
 
 	drm_debugfs_add_file(dev, "iftu_state", vita_iftu_debugfs_state_show, NULL);
+	drm_debugfs_add_file(dev, "iftu_hw", vita_iftu_debugfs_hw_show, NULL);
+	drm_debugfs_add_file(dev, "iftu_buffers", vita_iftu_debugfs_buffers_show, NULL);
 
 	/*
 	 * fbdev-console emulation: historical failure record and M3-E opt-in.
