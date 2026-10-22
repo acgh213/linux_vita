@@ -125,15 +125,10 @@ struct vita_iftu_device {
 	struct drm_encoder encoder;
 	struct drm_connector connector;
 
-	/* Plane format list. simpledrm's format-conversion emulation (fbdev
-	 * console, etc.) needs more than just the native pixel format --
-	 * drm_fb_build_fourcc_list() expands it to include the legacy
-	 * XRGB8888 target fbdev emulation looks for. Without this, probe
-	 * succeeds but fbdev-shmem setup fails with "No compatible format
-	 * found" because drm_mode_legacy_fb_format(32, 24) can't find
-	 * XRGB8888 in a single-entry ABGR8888-only list.
+	/* Native ABGR8888 plus legacy XRGB8888 conversion for fbdev.
+	 * Both must be explicit: the generic list helper removes native alpha.
 	 */
-	uint32_t formats[8];
+	uint32_t formats[2];
 	size_t nformats;
 
 	/* Bounded callback trace for the supervised first-commit test. */
@@ -950,8 +945,13 @@ static struct vita_iftu_device *vita_iftu_device_create(const struct drm_driver 
 	max_width = idev->mode.hdisplay;
 	max_height = idev->mode.vdisplay;
 
-	idev->nformats = drm_fb_build_fourcc_list(dev, &idev->format->format, 1,
-						   idev->formats, ARRAY_SIZE(idev->formats));
+	/* Advertise only paths drm_fb_blit() can execute for ABGR scanout.
+	 * The generic list helper replaces ABGR with XBGR, which the blit
+	 * helper cannot convert back to ABGR and hides the native copy path.
+	 */
+	idev->formats[0] = idev->format->format;
+	idev->formats[1] = DRM_FORMAT_XRGB8888;
+	idev->nformats = 2;
 
 	primary_plane = &idev->primary_plane;
 	ret = drm_universal_plane_init(dev, primary_plane, 0,
